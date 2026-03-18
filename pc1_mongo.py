@@ -1,9 +1,16 @@
-import argparse, json, threading, time, sys
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import uuid4
 
 import paho.mqtt.client as mqtt
-from pymongo import MongoClient, ASCENDING
+from pymongo import ASCENDING, MongoClient
 from pymongo.errors import DuplicateKeyError, OperationFailure
 
 GROUP_ID = 5
@@ -13,24 +20,24 @@ VALIDATION_TIMEOUT = 20
 REPUBLISH_INTERVAL = 0.2
 REPUBLISH_GAP_SECONDS = 1
 BATCH_SIZE = 100
-
 MONGO_URI = "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=rs0"
+
 mongo = MongoClient(MONGO_URI)
 mongo_events = mongo["pisid"]["sensor_events"]
-
 MQTT_CLIENT = None
 stop_event = threading.Event()
 
 
+@dataclass
 class RuntimeState:
-    def __init__(self):
-        self.simulation_id = None
-        self.current_seq = 0
-        self.validation_ok = False
-        self.validation_error = None
-        self.validation_request_id = None
-        self.raw_subscribed = False
-        self.simulation_finished = False
+    simulation_id: int | None = None
+    current_seq: int = 0
+    validation_ok: bool = False
+    validation_error: str | None = None
+    validation_request_id: str | None = None
+    raw_subscribed: bool = False
+    simulation_finished: bool = False
+
 
 STATE = RuntimeState()
 
@@ -43,24 +50,11 @@ def raw_topics():
     ]
 
 
-def stage2_topic():
-    return f"pisid_pc2_stage2_{GROUP_ID}"
-
-
-def ack_topic():
-    return f"pisid_pc2_ack_{GROUP_ID}"
-
-
-def simcheck_req_topic():
-    return f"pisid_simcheck_req_{GROUP_ID}"
-
-
-def simcheck_resp_topic():
-    return f"pisid_simcheck_resp_{GROUP_ID}"
-
-
-def game_end_topic():
-    return f"pisid_game_end_{GROUP_ID}"
+def stage2_topic(): return f"pisid_pc2_stage2_{GROUP_ID}"
+def ack_topic(): return f"pisid_pc2_ack_{GROUP_ID}"
+def simcheck_req_topic(): return f"pisid_simcheck_req_{GROUP_ID}"
+def simcheck_resp_topic(): return f"pisid_simcheck_resp_{GROUP_ID}"
+def game_end_topic(): return f"pisid_game_end_{GROUP_ID}"
 
 
 def ensure_indexes():
@@ -74,9 +68,7 @@ def ensure_indexes():
     except OperationFailure as e:
         if getattr(e, "code", None) != 86:
             raise
-    mongo_events.create_index(
-        [("publish_state", ASCENDING), ("simulation_id", ASCENDING), ("seq", ASCENDING)]
-    )
+    mongo_events.create_index([("publish_state", ASCENDING), ("simulation_id", ASCENDING), ("seq", ASCENDING)])
 
 
 def is_primary():
@@ -86,22 +78,14 @@ def is_primary():
         return False
 
 
-def subscribe_raw_topics():
-    if STATE.raw_subscribed:
+def set_raw_subscription(enabled: bool):
+    if enabled == STATE.raw_subscribed:
         return
+    action = MQTT_CLIENT.subscribe if enabled else MQTT_CLIENT.unsubscribe
     for topic in raw_topics():
-        MQTT_CLIENT.subscribe(topic, qos=1)
-    STATE.raw_subscribed = True
-    print("PC1: raw topics subscribed")
-
-
-def unsubscribe_raw_topics():
-    if not STATE.raw_subscribed:
-        return
-    for topic in raw_topics():
-        MQTT_CLIENT.unsubscribe(topic)
-    STATE.raw_subscribed = False
-    print("PC1: raw topics unsubscribed")
+        action(topic, qos=1) if enabled else action(topic)
+    STATE.raw_subscribed = enabled
+    print(f"PC1: raw topics {'subscribed' if enabled else 'unsubscribed'}")
 
 
 def save_raw_event(topic, payload):
@@ -109,24 +93,21 @@ def save_raw_event(topic, payload):
         return
 
     STATE.current_seq += 1
-    seq = STATE.current_seq
-
+    doc = {
+        "event_id": f"{STATE.simulation_id}:{STATE.current_seq}",
+        "simulation_id": STATE.simulation_id,
+        "seq": STATE.current_seq,
+        "topic": topic,
+        "payload": payload,
+        "received_at": datetime.now(),
+        "publish_state": "pending",
+        "last_publish_at": None,
+        "ack_result": None,
+        "ack_error": None,
+    }
     try:
-        mongo_events.insert_one(
-            {
-                "event_id": f"{STATE.simulation_id}:{seq}",
-                "simulation_id": STATE.simulation_id,
-                "seq": seq,
-                "topic": topic,
-                "payload": payload,
-                "received_at": datetime.now(),
-                "publish_state": "pending",
-                "last_publish_at": None,
-                "ack_result": None,
-                "ack_error": None,
-            }
-        )
-        print(f"PC1: saved seq={seq}")
+        mongo_events.insert_one(doc)
+        print(f"PC1: saved seq={STATE.current_seq}")
     except DuplicateKeyError:
         pass
 
@@ -146,18 +127,14 @@ def publish_doc(doc):
         ),
         qos=1,
     )
-
-    mongo_events.update_one(
-        {"_id": doc["_id"]},
-        {"$set": {"last_publish_at": datetime.now()}},
-    )
+    mongo_events.update_one({"_id": doc["_id"]}, {"$set": {"last_publish_at": datetime.now()}})
 
 
 def publish_pending():
     while not stop_event.is_set():
         if STATE.validation_ok and is_primary():
             cutoff = datetime.now() - timedelta(seconds=REPUBLISH_GAP_SECONDS)
-            docs = (
+            cursor = (
                 mongo_events.find(
                     {
                         "simulation_id": STATE.simulation_id,
@@ -171,72 +148,81 @@ def publish_pending():
                 .sort("seq", 1)
                 .limit(BATCH_SIZE)
             )
-
-            for doc in docs:
+            for doc in cursor:
                 publish_doc(doc)
-
         time.sleep(REPUBLISH_INTERVAL)
 
 
 def wait_validation():
     STATE.validation_request_id = str(uuid4())
-    start = time.time()
+    deadline = time.time() + VALIDATION_TIMEOUT
 
     while not stop_event.is_set() and not STATE.validation_ok and STATE.validation_error is None:
-        if time.time() - start >= VALIDATION_TIMEOUT:
+        if time.time() >= deadline:
             STATE.validation_error = "pc2_no_response"
             return
-
         MQTT_CLIENT.publish(
             simcheck_req_topic(),
-            json.dumps(
-                {
-                    "request_id": STATE.validation_request_id,
-                    "simulation_id": STATE.simulation_id,
-                }
-            ),
+            json.dumps({
+                "request_id": STATE.validation_request_id,
+                "simulation_id": STATE.simulation_id,
+            }),
             qos=1,
         )
         time.sleep(2)
 
 
+def handle_simcheck_response(data):
+    if data.get("request_id") != STATE.validation_request_id:
+        return
+    status = data.get("status")
+    if status == "ok":
+        STATE.validation_ok = True
+        set_raw_subscription(True)
+        print(f"PC1: simulation {STATE.simulation_id} validated")
+    else:
+        STATE.validation_error = status
+
+
+def handle_ack(data):
+    if int(data.get("simulation_id", -1)) != STATE.simulation_id or not is_primary():
+        return
+    mongo_events.update_one(
+        {
+            "simulation_id": STATE.simulation_id,
+            "seq": int(data["seq"]),
+            "publish_state": "pending",
+        },
+        {
+            "$set": {
+                "publish_state": "done" if data.get("result") == "success" else "invalid",
+                "ack_result": data.get("result"),
+                "ack_error": data.get("error"),
+            }
+        },
+    )
+
+
+def handle_game_end(data):
+    if int(data.get("simulation_id", -1)) != STATE.simulation_id:
+        return
+    STATE.simulation_finished = True
+    set_raw_subscription(False)
+    print(f"PC1: simulation {STATE.simulation_id} finished")
+    stop_event.set()
+
+
 def on_message(client, userdata, msg):
     try:
         data = json.loads(msg.payload.decode())
-
-        if msg.topic == simcheck_resp_topic() and data.get("request_id") == STATE.validation_request_id:
-            if data.get("status") == "ok":
-                STATE.validation_ok = True
-                subscribe_raw_topics()
-                print(f"PC1: simulation {STATE.simulation_id} validated")
-            else:
-                STATE.validation_error = data.get("status")
-
-        elif msg.topic == ack_topic() and int(data.get("simulation_id", -1)) == STATE.simulation_id and is_primary():
-            mongo_events.update_one(
-                {
-                    "simulation_id": STATE.simulation_id,
-                    "seq": int(data["seq"]),
-                    "publish_state": "pending",
-                },
-                {
-                    "$set": {
-                        "publish_state": "done" if data.get("result") == "success" else "invalid",
-                        "ack_result": data.get("result"),
-                        "ack_error": data.get("error"),
-                    }
-                },
-            )
-
-        elif msg.topic == game_end_topic() and int(data.get("simulation_id", -1)) == STATE.simulation_id:
-            STATE.simulation_finished = True
-            unsubscribe_raw_topics()
-            print(f"PC1: simulation {STATE.simulation_id} finished")
-            stop_event.set()
-
+        if msg.topic == simcheck_resp_topic():
+            handle_simcheck_response(data)
+        elif msg.topic == ack_topic():
+            handle_ack(data)
+        elif msg.topic == game_end_topic():
+            handle_game_end(data)
         elif STATE.validation_ok and is_primary() and msg.topic in raw_topics():
             save_raw_event(msg.topic, data)
-
     except Exception as e:
         print("Erro PC1:", e)
 
@@ -255,11 +241,7 @@ def main():
     STATE.simulation_id = parser.parse_args().simulation_id
 
     ensure_indexes()
-
-    last_doc = mongo_events.find_one(
-        {"simulation_id": STATE.simulation_id},
-        sort=[("seq", -1)],
-    )
+    last_doc = mongo_events.find_one({"simulation_id": STATE.simulation_id}, sort=[("seq", -1)])
     STATE.current_seq = last_doc["seq"] if last_doc else 0
 
     MQTT_CLIENT = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -279,10 +261,7 @@ def main():
 
     try:
         while not stop_event.is_set():
-            if not is_primary() and STATE.raw_subscribed:
-                unsubscribe_raw_topics()
-            elif STATE.validation_ok and is_primary() and not STATE.raw_subscribed:
-                subscribe_raw_topics()
+            set_raw_subscription(STATE.validation_ok and is_primary() and not STATE.simulation_finished)
             time.sleep(1)
     except KeyboardInterrupt:
         pass
