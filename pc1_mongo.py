@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import argparse
 import json
 import sys
@@ -107,7 +106,7 @@ def save_raw_event(topic, payload):
     }
     try:
         mongo_events.insert_one(doc)
-        print(f"PC1: saved seq={STATE.current_seq}")
+        print(f"PC1: saved seq={STATE.current_seq}, {payload}")
     except DuplicateKeyError:
         pass
 
