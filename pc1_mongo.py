@@ -87,28 +87,84 @@ def set_raw_subscription(enabled: bool):
     print(f"PC1: raw topics {'subscribed' if enabled else 'unsubscribed'}")
 
 
+def payload_code(payload):
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def is_consecutive_duplicate(topic, payload):
+    now = datetime.now()
+
+    last_doc = mongo_events.find_one(
+        {
+            "simulation_id": STATE.simulation_id,
+            "topic": topic,
+        },
+        sort=[("received_at", -1)],
+    )
+    if not last_doc:
+        return None
+
+    same_payload = payload_code(last_doc["payload"]) == payload_code(payload)
+    if not same_payload:
+        return None
+
+    if "mazemov" in topic:
+        return last_doc
+
+    if "mazetemp" in topic or "mazesound" in topic:
+        if (now - last_doc["received_at"]).total_seconds() <= 1:
+            return last_doc
+
+    return None
+
+
 def save_raw_event(topic, payload):
     if STATE.simulation_finished:
         return
 
+    dup_doc = is_consecutive_duplicate(topic, payload)
+    if dup_doc:
+        print("Bomdia!!!!")
+        try:
+            mongo_events.insert_one(
+                {
+                    "event_id": f"{STATE.simulation_id}:{dup_doc['seq']}:dup:{datetime.now().timestamp()}",
+                    "simulation_id": STATE.simulation_id,
+                    "topic": topic,
+                    "payload": payload,
+                    "received_at": datetime.now(),
+                    "publish_state": "duplicate",
+                    "last_publish_at": None,
+                    "ack_result": None,
+                    "ack_error": None,
+                }
+            )
+            print(f"PC1: duplicate of seq={dup_doc['seq']}, {payload}")
+        except DuplicateKeyError as e:
+            print("PC1 duplicate insert error:", e)
+        return
+
     STATE.current_seq += 1
-    doc = {
-        "event_id": f"{STATE.simulation_id}:{STATE.current_seq}",
-        "simulation_id": STATE.simulation_id,
-        "seq": STATE.current_seq,
-        "topic": topic,
-        "payload": payload,
-        "received_at": datetime.now(),
-        "publish_state": "pending",
-        "last_publish_at": None,
-        "ack_result": None,
-        "ack_error": None,
-    }
+    seq = STATE.current_seq
+
     try:
-        mongo_events.insert_one(doc)
-        print(f"PC1: saved seq={STATE.current_seq}, {payload}")
-    except DuplicateKeyError:
-        pass
+        mongo_events.insert_one(
+            {
+                "event_id": f"{STATE.simulation_id}:{seq}",
+                "simulation_id": STATE.simulation_id,
+                "seq": seq,
+                "topic": topic,
+                "payload": payload,
+                "received_at": datetime.now(),
+                "publish_state": "pending",
+                "last_publish_at": None,
+                "ack_result": None,
+                "ack_error": None,
+            }
+        )
+        print(f"PC1: saved seq={seq}, {payload}")
+    except DuplicateKeyError as e:
+        print("PC1 insert error:", e)
 
 
 def publish_doc(doc):
