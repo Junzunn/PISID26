@@ -16,9 +16,9 @@ GROUP_ID = 5
 BROKER = "broker.emqx.io"
 PORT = 1883
 VALIDATION_TIMEOUT = 20
-REPUBLISH_INTERVAL = 0.2
-REPUBLISH_GAP_SECONDS = 1
-BATCH_SIZE = 100
+SEC_TRANSPORTE = 0.5
+SEC_RETRANSMISSAO = 2
+BATCH_SIZE = 50
 MONGO_URI = "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=rs0"
 
 mongo = MongoClient(MONGO_URI)
@@ -188,7 +188,7 @@ def publish_doc(doc):
 def publish_pending():
     while not stop_event.is_set():
         if STATE.validation_ok and is_primary():
-            cutoff = datetime.now() - timedelta(seconds=REPUBLISH_GAP_SECONDS)
+            cutoff = datetime.now() - timedelta(seconds=SEC_RETRANSMISSAO)
             cursor = (
                 mongo_events.find(
                     {
@@ -205,7 +205,7 @@ def publish_pending():
             )
             for doc in cursor:
                 publish_doc(doc)
-        time.sleep(REPUBLISH_INTERVAL)
+        time.sleep(SEC_TRANSPORTE)
 
 
 def wait_validation():
