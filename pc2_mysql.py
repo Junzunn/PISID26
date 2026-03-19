@@ -132,6 +132,24 @@ def simulation_finished(cur, simulation_id):
     row = cur.fetchone()
     return bool(row and row[0])
 
+def load_expected_seq(sim_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT COALESCE(MAX(CAST(SUBSTRING_INDEX(EventID, ':', -1) AS UNSIGNED)), 0)
+            FROM EventosProcessados
+            WHERE IDSimulacao = %s
+              AND EstadoProcessamento IN ('DONE', 'INVALID')
+            """,
+            (sim_id,),
+        )
+        last_seq = cur.fetchone()[0] or 0
+        return last_seq + 1
+    finally:
+        cur.close()
+        conn.close()
 
 def publish_simcheck_response(request_id, status):
     MQTT_CLIENT.publish(simcheck_resp_topic(), json.dumps({"request_id": request_id, "status": status}), qos=1)
@@ -287,7 +305,7 @@ def process_stage2_message(msg_data):
 def handle_stage2_sequence(msg_data):
     sim_id = int(msg_data["simulation_id"])
     seq = int(msg_data["seq"])
-    state = sim_states.setdefault(sim_id, {"expected": 1, "buf": {}})
+    state = sim_states.setdefault(sim_id, {"expected": load_expected_seq(sim_id), "buf": {}})
 
     if seq < state["expected"]:
         publish_ack(sim_id, seq, "success")
