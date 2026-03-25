@@ -28,7 +28,7 @@ EVENT_SPECS = {
             "player": int(p["Player"]),
             "value": float(p["Temperature"]),
         },
-        "proc": lambda sim_id, e: ("sp_record_temperature", (sim_id, e["player"], e["value"], e["hora"])),
+        "proc": lambda sim_id, e: ("sp_valid_temperature", (sim_id, e["hora"], e["value"])),
     },
     "sound": {
         "required": ("Hour", "Player", "Sound"),
@@ -38,7 +38,7 @@ EVENT_SPECS = {
             "player": int(p["Player"]),
             "value": float(p["Sound"]),
         },
-        "proc": lambda sim_id, e: ("sp_record_sound", (sim_id, e["player"], e["value"], e["hora"])),
+        "proc": lambda sim_id, e: ("sp_valid_sound", (sim_id, e["hora"], e["value"])),
     },
     "movement": {
         "required": ("Player", "Marsami", "RoomOrigin", "RoomDestiny", "Status"),
@@ -52,7 +52,7 @@ EVENT_SPECS = {
             "status": int(p["Status"]),
         },
         "proc": lambda sim_id, e: (
-            "sp_record_movement",
+            "sp_valid_movement",
             (sim_id, e["player"], e["marsami"], e["origin"], e["destiny"], e["status"], e["hora"]),
         ),
     },
@@ -79,31 +79,6 @@ def topic_to_event_type(topic: str) -> str:
         if marker in topic:
             return event_type
     raise InvalidEventError(f"Unknown topic: {topic}")
-
-
-def log_message(simulation_id, tipo_alerta, msg, sensor=None, cur=None):
-    conn = None
-    own_conn = False
-    try:
-        if cur is None:
-            conn = db()
-            cur = conn.cursor()
-            own_conn = True
-        cur.execute(
-            """
-            INSERT INTO Mensagens (Hora, Sensor, TipoAlerta, Msg, HoraEscrita, IDSimulacao)
-            VALUES (NOW(), %s, %s, %s, NOW(), %s)
-            """,
-            (sensor, tipo_alerta, str(msg)[:100], simulation_id),
-        )
-        if own_conn:
-            conn.commit()
-    except Exception as e:
-        print("Error logging:", e)
-    finally:
-        if own_conn:
-            cur.close()
-            conn.close()
 
 
 def check_simulation(simulation_id):
@@ -240,7 +215,16 @@ def finalize_success(conn, cur, sim_id, seq, event_id):
 
 
 def finalize_invalid(conn, cur, sim_id, seq, event_id, sensor, message):
-    log_message(sim_id, "DADO_INVALIDO", message, sensor=sensor, cur=cur)
+    cur.callproc("sp_log_message",
+        (
+            sim_id,
+            sensor or "system",
+            "DADO_INVALIDO",
+            str(message)[:255],
+            datetime.now(),
+            None,
+        ),
+    )
     mark_event(cur, event_id, "INVALID", message)
     conn.commit()
     print(f"[MYSQL INVALID] sim={sim_id} seq={seq} error={message}")
