@@ -1,6 +1,5 @@
 import time
-import json
-from typing import Optional, Tuple
+from typing import Optional
 
 import mysql.connector
 import paho.mqtt.client as mqtt
@@ -23,20 +22,17 @@ DB_CONFIG = {
 POLL_INTERVAL_SECONDS = 2
 
 # Alertas que devem originar acao automatica.
-# Mantidos simples e alinhados com o SQL atual.
 ALERT_TEMPERATURE = "ALERTA_TEMPERATURA"
 ALERT_SOUND = "ALERTA_SOM"
-
-# Comandos esperados pelo servidor do labirinto.
-CMD_AC_ON = "AcOn"
-CMD_CLOSE_ALL = "CloseAllDoor"
+BLOCK_TEMPERATURE = "BLOQUEIO_TEMPERATURA"
+BLOCK_SOUND = "BLOQUEIO_SOM"
 
 
 class Atuador:
     def __init__(self) -> None:
         self.last_message_id = 0
-        self.last_temp_alert_sim: Optional[int] = None
-        self.last_sound_alert_sim: Optional[int] = None
+        self.last_close_all_sim: Optional[int] = None
+        self.last_ac_on_sim: Optional[int] = None
 
         self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
         self.mqtt_connected = False
@@ -60,11 +56,17 @@ class Atuador:
         self.mqtt_connected = False
         print("[MQTT] Desligado")
 
-    def publish_action(self, command: str) -> None:
-        payload = command
+    def publish_close_all(self) -> None:
+        payload = f"{{Type: CloseAllDoor, Player: {PLAYER_ID}}}"
         info = self.mqtt_client.publish(MQTT_TOPIC_ACTION, payload, qos=1)
         info.wait_for_publish()
-        print(f"[MQTT] Enviado para {MQTT_TOPIC_ACTION}: {payload}")
+        print(f"[MQTT] Enviado: {payload}")
+
+    def publish_ac_on(self) -> None:
+        payload = f"{{Type: AcOn, Player: {PLAYER_ID}}}"
+        info = self.mqtt_client.publish(MQTT_TOPIC_ACTION, payload, qos=1)
+        info.wait_for_publish()
+        print(f"[MQTT] Enviado: {payload}")
 
     # =========================
     # Base de dados
@@ -88,13 +90,13 @@ class Atuador:
         cur = conn.cursor()
         try:
             cur.execute(
-                "SELECT DataHoraFim FROM Simulacao WHERE IDSimulacao = %s",
+                "SELECT Estado FROM Simulacao WHERE IDSimulacao = %s",
                 (sim_id,),
             )
             row = cur.fetchone()
             if row is None:
                 return True
-            return row[0] is not None
+            return row[0] in ("Terminada",)
         finally:
             cur.close()
             conn.close()
@@ -106,9 +108,9 @@ class Atuador:
             cur.execute(
                 """
                 SELECT ID, IDSimulacao, TipoAlerta, Msg, Hora, HoraEscrita
-                  FROM Mensagens
-                 WHERE ID > %s
-                 ORDER BY ID ASC
+                FROM Mensagens
+                WHERE ID > %s
+                ORDER BY ID ASC
                 """,
                 (self.last_message_id,),
             )
@@ -120,53 +122,59 @@ class Atuador:
     # =========================
     # Regras do atuador
     # =========================
-    def should_handle_temperature(self, sim_id: int) -> bool:
-        # Evita enviar repetidamente AcOn para a mesma simulacao.
-        return self.last_temp_alert_sim != sim_id
+    def should_send_close_all(self, sim_id: int, alert_type: str) -> bool:
+        if alert_type not in (BLOCK_TEMPERATURE, BLOCK_SOUND):
+            return False
+        return self.last_close_all_sim != sim_id
 
-    def should_handle_sound(self, sim_id: int) -> bool:
-        # Evita enviar repetidamente CloseAllDoor para a mesma simulacao.
-        return self.last_sound_alert_sim != sim_id
+    def should_send_ac_on(self, sim_id: int, alert_type: str) -> bool:
+        if alert_type != ALERT_TEMPERATURE:
+            return False
+        return self.last_ac_on_sim != sim_id
 
-    def map_alert_to_action(self, sim_id: int, alert_type: str) -> Tuple[Optional[str], bool]:
-        if alert_type == ALERT_TEMPERATURE:
-            return CMD_AC_ON, self.should_handle_temperature(sim_id)
+    def mark_close_all_sent(self, sim_id: int) -> None:
+        self.last_close_all_sim = sim_id
 
-        if alert_type == ALERT_SOUND:
-            return CMD_CLOSE_ALL, self.should_handle_sound(sim_id)
-
-        return None, False
-
-    def mark_action_sent(self, sim_id: int, alert_type: str) -> None:
-        if alert_type == ALERT_TEMPERATURE:
-            self.last_temp_alert_sim = sim_id
-        elif alert_type == ALERT_SOUND:
-            self.last_sound_alert_sim = sim_id
+    def mark_ac_on_sent(self, sim_id: int) -> None:
+        self.last_ac_on_sim = sim_id
 
     def process_message(self, row: dict) -> None:
         msg_id = int(row["ID"])
         sim_id = int(row["IDSimulacao"])
         alert_type = row["TipoAlerta"]
 
-        command, should_send = self.map_alert_to_action(sim_id, alert_type)
-        if command is None:
+        if alert_type not in (ALERT_TEMPERATURE, BLOCK_TEMPERATURE, BLOCK_SOUND):
             self.last_message_id = msg_id
             return
 
         if self.simulation_finished(sim_id):
-            print(f"[SKIP] sim={sim_id} terminada; alerta {alert_type} ignorado")
+            print(f"[SKIP] sim={sim_id} estado final; alerta {alert_type} ignorado")
             self.last_message_id = msg_id
             return
 
-        if not should_send:
-            print(f"[SKIP] sim={sim_id} alerta repetido {alert_type}")
+        if alert_type == ALERT_TEMPERATURE:
+            if not self.should_send_ac_on(sim_id, alert_type):
+                print(f"[SKIP] sim={sim_id} AcOn ja enviado")
+                self.last_message_id = msg_id
+                return
+
+            print(f"[MYSQL] ID={msg_id} sim={sim_id} alerta={alert_type} -> comando=AcOn")
+            self.publish_ac_on()
+            self.mark_ac_on_sent(sim_id)
             self.last_message_id = msg_id
             return
 
-        print(f"[MYSQL] ID={msg_id} sim={sim_id} alerta={alert_type} -> comando={command}")
-        self.publish_action(command)
-        self.mark_action_sent(sim_id, alert_type)
-        self.last_message_id = msg_id
+        if alert_type in (BLOCK_TEMPERATURE, BLOCK_SOUND):
+            if not self.should_send_close_all(sim_id, alert_type):
+                print(f"[SKIP] sim={sim_id} CloseAllDoor ja enviado")
+                self.last_message_id = msg_id
+                return
+
+            print(f"[MYSQL] ID={msg_id} sim={sim_id} alerta={alert_type} -> comando=CloseAllDoor")
+            self.publish_close_all()
+            self.mark_close_all_sent(sim_id)
+            self.last_message_id = msg_id
+            return
 
     # =========================
     # Ciclo principal

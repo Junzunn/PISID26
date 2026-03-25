@@ -86,26 +86,33 @@ def check_simulation(simulation_id):
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT DataHoraInicio, DataHoraFim FROM Simulacao WHERE IDSimulacao = %s LIMIT 1",
+            "SELECT Estado FROM Simulacao WHERE IDSimulacao = %s LIMIT 1",
             (simulation_id,),
         )
         row = cur.fetchone()
+
         if not row:
-            return f"A simulacao{simulation_id} nao existe"
-        if row[1]:
-            return f"A simulacao{simulation_id} ja foi terminada"
-        if not row[0]:
-            return f"A simulacao{simulation_id} nao esta iniciada"
+            return f"A simulacao {simulation_id} nao existe"
+
+        estado = row[0]
+
+        if estado == "PorIniciar":
+            return f"A simulacao {simulation_id} nao esta iniciada"
+        if estado == "Terminada":
+            return f"A simulacao {simulation_id} ja foi terminada"
+
         return "ok"
     finally:
         cur.close()
         conn.close()
 
-
 def simulation_finished(cur, simulation_id):
-    cur.execute("SELECT DataHoraFim FROM Simulacao WHERE IDSimulacao = %s LIMIT 1", (simulation_id,))
+    cur.execute(
+        "SELECT Estado FROM Simulacao WHERE IDSimulacao = %s LIMIT 1",
+        (simulation_id,),
+    )
     row = cur.fetchone()
-    return bool(row and row[0])
+    return bool(row and row[0] == "Terminada")
 
 def load_expected_seq(sim_id):
     conn = db()
@@ -240,11 +247,6 @@ def process_stage2_message(msg_data):
     seq = int(msg_data["seq"])
     event_id = msg_data["event_id"]
 
-    sim_status = check_simulation(sim_id)
-    if sim_status != "ok":
-        publish_ack(sim_id, seq, "invalid", sim_status)
-        return True
-
     conn = db()
     cur = conn.cursor()
     event_type = None
@@ -264,6 +266,10 @@ def process_stage2_message(msg_data):
             conn.rollback()
             publish_ack(sim_id, seq, "success")
             return True
+
+        sim_status = check_simulation(sim_id)
+        if sim_status != "ok":
+            return finalize_invalid(conn, cur, sim_id, seq, event_id, event_type, sim_status)
 
         event_data = validate_event(msg_data)
         dispatch_event(cur, sim_id, event_data)
