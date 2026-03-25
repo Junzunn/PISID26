@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: localhost
--- Generation Time: Mar 25, 2026 at 06:06 PM
+-- Generation Time: Mar 25, 2026 at 06:29 PM
 -- Server version: 10.4.28-MariaDB
 -- PHP Version: 8.2.4
 
@@ -151,47 +151,55 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `alterar_meus_dados_utilizador` (IN 
     WHERE Username = v_username;
 END$$
 
-CREATE DEFINER=`root`@`localhost` PROCEDURE `criar_simulacao` (IN `p_descricao` TEXT)  MODIFIES SQL DATA BEGIN
-    DECLARE v_current_username VARCHAR(50);
-    DECLARE v_user_exists INT DEFAULT 0;
-    DECLARE v_id_utilizador INT;
-    DECLARE v_equipa INT;
-
-    SET v_current_username = SUBSTRING_INDEX(USER(), '@', 1);
+CREATE DEFINER=`root`@`localhost` PROCEDURE `criar_simulacao` (IN `p_nome` VARCHAR(100), IN `p_data_hora` DATETIME, IN `p_duracao_seg` INT)   proc: BEGIN
+    DECLARE v_user_id INT;
+    DECLARE v_exists INT DEFAULT 0;
 
     SELECT COUNT(*)
-      INTO v_user_exists
+      INTO v_exists
       FROM Utilizador
-     WHERE Username = v_current_username;
-
-    IF v_user_exists = 0 THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Acesso negado: utilizador autenticado nao existe na tabela Utilizador.';
-    END IF;
-
-    SELECT IDUtilizador, Equipa
-      INTO v_id_utilizador, v_equipa
-      FROM Utilizador
-     WHERE Username = v_current_username
+     WHERE Email = SUBSTRING_INDEX(USER(), '@', 1)
      LIMIT 1;
 
-    INSERT INTO Simulacao
-    (
-        IDUtilizadorCriador,
-        Descricao,
-        Equipa,
-        DataHorainicio,
-        DataHoraFim,
-        Estado
+    IF v_exists = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Utilizador atual nao encontrado.';
+    END IF;
+
+    SELECT IDUtilizador
+      INTO v_user_id
+      FROM Utilizador
+     WHERE Email = SUBSTRING_INDEX(USER(), '@', 1)
+     LIMIT 1;
+
+    IF p_nome IS NULL OR TRIM(p_nome) = '' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Nome da simulacao invalido.';
+    END IF;
+
+    IF p_data_hora IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Data/hora da simulacao invalida.';
+    END IF;
+
+    IF p_duracao_seg IS NULL OR p_duracao_seg <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Duracao da simulacao invalida.';
+    END IF;
+
+    INSERT INTO Simulacao (
+        Nome,
+        DataHora,
+        DuracaoSeg,
+        Estado,
+        IDUtilizadorCriador
     )
-    VALUES
-    (
-        v_id_utilizador,
-        p_descricao,
-        v_equipa,
-        NULL,
-        NULL,
-        'PorIniciar'
+    VALUES (
+        p_nome,
+        p_data_hora,
+        p_duracao_seg,
+        'PorIniciar',
+        v_user_id
     );
 END$$
 
@@ -328,63 +336,62 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `eliminar_utilizador_admin` (IN `p_u
     FLUSH PRIVILEGES;
 END$$
 
-CREATE DEFINER=`root`@`localhost` PROCEDURE `iniciar_simulacao` (IN `p_idSimulacao` INT)  MODIFIES SQL DATA BEGIN
-    DECLARE v_current_username VARCHAR(50);
-    DECLARE v_user_exists INT DEFAULT 0;
-    DECLARE v_equipa_utilizador INT;
+CREATE DEFINER=`root`@`localhost` PROCEDURE `iniciar_simulacao` (IN `p_idSimulacao` INT)   proc: BEGIN
+    DECLARE v_equipa_user INT;
     DECLARE v_equipa_simulacao INT;
     DECLARE v_estado VARCHAR(20);
-    DECLARE v_sim_exists INT DEFAULT 0;
-
-    SET v_current_username = SUBSTRING_INDEX(USER(), '@', 1);
+    DECLARE v_exists INT DEFAULT 0;
 
     SELECT COUNT(*)
-      INTO v_user_exists
+      INTO v_exists
       FROM Utilizador
-     WHERE Username = v_current_username;
+     WHERE Email = SUBSTRING_INDEX(USER(), '@', 1)
+     LIMIT 1;
 
-    IF v_user_exists = 0 THEN
+    IF v_exists = 0 THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Acesso negado: utilizador autenticado nao existe na tabela Utilizador.';
+        SET MESSAGE_TEXT = 'Utilizador atual nao encontrado.';
     END IF;
 
     SELECT Equipa
-      INTO v_equipa_utilizador
+      INTO v_equipa_user
       FROM Utilizador
-     WHERE Username = v_current_username
+     WHERE Email = SUBSTRING_INDEX(USER(), '@', 1)
      LIMIT 1;
 
     SELECT COUNT(*)
-      INTO v_sim_exists
-      FROM Simulacao
-     WHERE IDSimulacao = p_idSimulacao;
-
-    IF v_sim_exists = 0 THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'A simulacao indicada nao existe.';
-    END IF;
-
-    SELECT Equipa, Estado
-      INTO v_equipa_simulacao, v_estado
+      INTO v_exists
       FROM Simulacao
      WHERE IDSimulacao = p_idSimulacao
      LIMIT 1;
 
-    IF v_equipa_utilizador <> v_equipa_simulacao THEN
+    IF v_exists = 0 THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Sem permissao: apenas utilizadores da mesma equipa podem iniciar a simulacao.';
+        SET MESSAGE_TEXT = 'Simulacao nao encontrada.';
+    END IF;
+
+    SELECT u.Equipa, s.Estado
+      INTO v_equipa_simulacao, v_estado
+      FROM Simulacao s
+      JOIN Utilizador u
+        ON u.IDUtilizador = s.IDUtilizadorCriador
+     WHERE s.IDSimulacao = p_idSimulacao
+     LIMIT 1;
+
+    IF v_equipa_user <> v_equipa_simulacao THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Nao tem permissao para iniciar esta simulacao.';
     END IF;
 
     IF v_estado <> 'PorIniciar' THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'A simulacao nao esta no estado PorIniciar.';
+        SET MESSAGE_TEXT = 'A simulacao nao pode ser iniciada neste estado.';
     END IF;
 
     UPDATE Simulacao
-       SET DataHorainicio = NOW(),
-           DataHoraFim = NULL,
-           Estado = 'ACorrer'
-     WHERE IDSimulacao = p_idSimulacao;
+        SET Estado = 'ACorrer',
+            DataHoraInicio = NOW()
+      WHERE IDSimulacao = p_idSimulacao;
 
     UPDATE Corridor
        SET Active = 1;
@@ -535,156 +542,116 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_log_message` (IN `p_id_simulacao
     );
 END$$
 
-CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_tentar_score` (IN `p_id_simulacao` INT, IN `p_sala` INT)   BEGIN
-    DECLARE v_current_username VARCHAR(50);
-    DECLARE v_user_exists INT DEFAULT 0;
-    DECLARE v_sim_exists INT DEFAULT 0;
-    DECLARE v_room_exists INT DEFAULT 0;
-
-    DECLARE v_id_utilizador INT DEFAULT NULL;
-    DECLARE v_player_id INT DEFAULT NULL;
-    DECLARE v_estado VARCHAR(20) DEFAULT NULL;
-
-    DECLARE v_contagem INT DEFAULT 0;
-    DECLARE v_equipa_ator INT DEFAULT NULL;
-    DECLARE v_equipa_sim INT DEFAULT NULL;
-
-    DECLARE v_odds INT DEFAULT 0;
-    DECLARE v_evens INT DEFAULT 0;
-
-    DECLARE v_resultado VARCHAR(10);
-    DECLARE v_pontos DECIMAL(4,2);
-
-    SET v_current_username = SUBSTRING_INDEX(USER(), '@', 1);
+CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_tentar_score` (IN `p_id_simulacao` INT, IN `p_sala` INT)   proc: BEGIN
+    DECLARE v_estado VARCHAR(20);
+    DECLARE v_equipa_user INT;
+    DECLARE v_equipa_sim INT;
+    DECLARE v_odd INT DEFAULT 0;
+    DECLARE v_even INT DEFAULT 0;
+    DECLARE v_tentativas INT DEFAULT 0;
+    DECLARE v_exists INT DEFAULT 0;
 
     SELECT COUNT(*)
-      INTO v_user_exists
+      INTO v_exists
       FROM Utilizador
-     WHERE Username = v_current_username;
+     WHERE Email = SUBSTRING_INDEX(USER(), '@', 1)
+     LIMIT 1;
 
-    IF v_user_exists = 0 THEN
+    IF v_exists = 0 THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Acesso negado: utilizador autenticado nao existe na tabela Utilizador.';
+        SET MESSAGE_TEXT = 'Utilizador atual nao encontrado.';
     END IF;
 
-    SELECT IDUtilizador, Equipa
-      INTO v_id_utilizador, v_equipa_ator
+    SELECT Equipa
+      INTO v_equipa_user
       FROM Utilizador
-     WHERE Username = v_current_username
+     WHERE Email = SUBSTRING_INDEX(USER(), '@', 1)
      LIMIT 1;
 
     SELECT COUNT(*)
-      INTO v_sim_exists
+      INTO v_exists
       FROM Simulacao
-     WHERE IDSimulacao = p_id_simulacao;
+     WHERE IDSimulacao = p_id_simulacao
+     LIMIT 1;
 
-    IF v_sim_exists = 0 THEN
+    IF v_exists = 0 THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Simulacao nao existe.';
+        SET MESSAGE_TEXT = 'Simulacao nao encontrada.';
     END IF;
 
-    SELECT COUNT(*)
-      INTO v_room_exists
-      FROM Corridor
-     WHERE RoomOrigin = p_sala
-        OR RoomDestiny = p_sala;
-
-    IF p_sala IS NULL OR p_sala <= 0 OR v_room_exists = 0 THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Sala invalida para acionar gatilho.';
-    END IF;
-
-    SELECT Estado, Equipa
+    SELECT s.Estado, u.Equipa
       INTO v_estado, v_equipa_sim
-      FROM Simulacao
-     WHERE IDSimulacao = p_id_simulacao
+      FROM Simulacao s
+      JOIN Utilizador u
+        ON u.IDUtilizador = s.IDUtilizadorCriador
+     WHERE s.IDSimulacao = p_id_simulacao
      LIMIT 1;
 
-    IF v_estado = 'PorIniciar' THEN
+    IF v_equipa_user <> v_equipa_sim THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'A simulacao ainda nao foi iniciada.';
+        SET MESSAGE_TEXT = 'Nao tem permissao para pontuar esta simulacao.';
     END IF;
 
-    IF v_estado IN ('Blocked', 'Terminada') THEN
+    IF v_estado <> 'ACorrer' AND v_estado <> 'Blocked' THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'A simulacao nao esta ativa para acionar o gatilho.';
-    END IF;
-
-    IF v_equipa_ator IS NULL OR v_equipa_sim IS NULL OR v_equipa_ator <> v_equipa_sim THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Sem permissao: apenas utilizadores da mesma equipa da simulacao podem acionar o gatilho.';
-    END IF;
-
-    SELECT MIN(Player)
-      INTO v_player_id
-      FROM Marsami
-     WHERE IDSimulacao = p_id_simulacao;
-
-    IF v_player_id IS NULL THEN
-        SET v_player_id = 0;
+        SET MESSAGE_TEXT = 'A simulacao nao esta num estado valido para pontuar.';
     END IF;
 
     SELECT COUNT(*)
-      INTO v_contagem
-      FROM ScoreSala
-     WHERE IDSimulacao = p_id_simulacao
-       AND Sala = p_sala;
-
-    IF v_contagem >= 3 THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Limite de tentativas atingido para esta sala.';
-    END IF;
-
-    SELECT COALESCE(MAX(NumeroOdds), 0), COALESCE(MAX(NumeroEvens), 0)
-      INTO v_odds, v_evens
+      INTO v_exists
       FROM OcupacaoLabirinto
      WHERE IDSimulacao = p_id_simulacao
        AND Sala = p_sala;
 
-    IF (v_odds + v_evens) > 0 AND v_odds = v_evens THEN
-        SET v_resultado = 'SUCESSO';
-        SET v_pontos = 1.00;
-    ELSE
-        SET v_resultado = 'FALHA';
-        SET v_pontos = -0.50;
+    IF v_exists = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Sala nao encontrada para esta simulacao.';
     END IF;
 
-    INSERT INTO ScoreSala
-    (
-        IDSimulacao,
-        PlayerID,
-        Sala,
-        Tentativa,
-        Hora,
-        Resultado,
-        Pontos
-    )
-    VALUES
-    (
+    SELECT OddCount, EvenCount
+      INTO v_odd, v_even
+      FROM OcupacaoLabirinto
+     WHERE IDSimulacao = p_id_simulacao
+       AND Sala = p_sala
+     LIMIT 1;
+
+    SELECT COALESCE(Tentativas, 0)
+      INTO v_tentativas
+      FROM ScoreSala
+     WHERE IDSimulacao = p_id_simulacao
+       AND Sala = p_sala
+     LIMIT 1;
+
+    IF v_tentativas >= 3 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Numero maximo de tentativas para esta sala atingido.';
+    END IF;
+
+    INSERT INTO ScoreSala (IDSimulacao, Sala, Tentativas, Pontuacao)
+    VALUES (
         p_id_simulacao,
-        v_player_id,
         p_sala,
-        v_contagem + 1,
-        NOW(),
-        v_resultado,
-        v_pontos
-    );
+        1,
+        CASE
+            WHEN v_odd = v_even AND v_odd <> 0 THEN 1.0
+            ELSE -0.5
+        END
+    )
+    ON DUPLICATE KEY UPDATE
+        Tentativas = Tentativas + 1,
+        Pontuacao = Pontuacao + CASE
+            WHEN v_odd = v_even AND v_odd <> 0 THEN 1.0
+            ELSE -0.5
+        END;
 
     CALL sp_log_message(
         p_id_simulacao,
-        'score',
-        'GATILHO_SCORE',
-        CONCAT(
-            'user=', v_current_username,
-            ' | player=', v_player_id,
-            ' | sala=', p_sala,
-            ' | odds=', v_odds,
-            ' | evens=', v_evens,
-            ' | resultado=', v_resultado,
-            ' | pontos=', v_pontos
-        ),
-        NOW(),
-        v_pontos
+        CASE
+            WHEN v_odd = v_even AND v_odd <> 0 THEN 'SCORE_SUCESSO'
+            ELSE 'SCORE_FALHADO'
+        END,
+        CONCAT('Tentativa de score na sala ', p_sala,
+               ' | odd=', v_odd, ' even=', v_even)
     );
 END$$
 
@@ -2741,7 +2708,6 @@ CREATE TABLE `Simulacao` (
   `IDSimulacao` int(11) NOT NULL,
   `IDUtilizadorCriador` int(11) NOT NULL,
   `Descricao` text DEFAULT NULL,
-  `Equipa` int(11) DEFAULT NULL,
   `DataHorainicio` timestamp NULL DEFAULT NULL,
   `DataHoraFim` timestamp NULL DEFAULT NULL,
   `Estado` enum('PorIniciar','ACorrer','Blocked','Terminada') NOT NULL DEFAULT 'PorIniciar'
@@ -2751,12 +2717,12 @@ CREATE TABLE `Simulacao` (
 -- Dumping data for table `Simulacao`
 --
 
-INSERT INTO `Simulacao` (`IDSimulacao`, `IDUtilizadorCriador`, `Descricao`, `Equipa`, `DataHorainicio`, `DataHoraFim`, `Estado`) VALUES
-(52, 71, NULL, NULL, '2026-03-25 01:04:43', '2026-03-25 01:08:55', 'Terminada'),
-(53, 1, NULL, NULL, '2026-03-25 01:26:03', '2026-03-25 01:29:21', 'Terminada'),
-(54, 1, NULL, NULL, '2026-03-25 01:26:03', '2026-03-25 01:43:58', 'Terminada'),
-(55, 1, NULL, NULL, NULL, '2026-03-25 16:32:10', 'Terminada'),
-(56, 1, NULL, NULL, NULL, NULL, 'ACorrer');
+INSERT INTO `Simulacao` (`IDSimulacao`, `IDUtilizadorCriador`, `Descricao`, `DataHorainicio`, `DataHoraFim`, `Estado`) VALUES
+(52, 71, NULL, '2026-03-25 01:04:43', '2026-03-25 01:08:55', 'Terminada'),
+(53, 1, NULL, '2026-03-25 01:26:03', '2026-03-25 01:29:21', 'Terminada'),
+(54, 1, NULL, '2026-03-25 01:26:03', '2026-03-25 01:43:58', 'Terminada'),
+(55, 1, NULL, NULL, '2026-03-25 16:32:10', 'Terminada'),
+(56, 1, NULL, NULL, NULL, 'ACorrer');
 
 --
 -- Triggers `Simulacao`
