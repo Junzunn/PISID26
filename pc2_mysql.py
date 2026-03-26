@@ -28,7 +28,7 @@ EVENT_SPECS = {
             "player": int(p["Player"]),
             "value": float(p["Temperature"]),
         },
-        "proc": lambda sim_id, e: ("sp_valid_temperature", (sim_id, e["hora"], e["value"])),
+        "proc": lambda sim_id, e: ("sp_processar_temperatura", (sim_id, e["hora"], e["value"])),
     },
     "sound": {
         "required": ("Hour", "Player", "Sound"),
@@ -38,7 +38,7 @@ EVENT_SPECS = {
             "player": int(p["Player"]),
             "value": float(p["Sound"]),
         },
-        "proc": lambda sim_id, e: ("sp_valid_sound", (sim_id, e["hora"], e["value"])),
+        "proc": lambda sim_id, e: ("sp_processar_ruido", (sim_id, e["hora"], e["value"])),
     },
     "movement": {
         "required": ("Player", "Marsami", "RoomOrigin", "RoomDestiny", "Status"),
@@ -52,26 +52,52 @@ EVENT_SPECS = {
             "status": int(p["Status"]),
         },
         "proc": lambda sim_id, e: (
-            "sp_valid_movement",
+            "sp_processar_movimento",
             (sim_id, e["player"], e["marsami"], e["origin"], e["destiny"], e["status"], e["hora"]),
         ),
     },
 }
 
 
-class InvalidEventError(Exception):
-    pass
+class InvalidEventError(Exception): pass
+
+def db(): return mysql.connector.connect(**MYSQL_CONFIG)
+
+def bridge_topic(): return f"pisid_pc_bridge_{GROUP_ID}"
+
+def publish_bridge(message: dict):
+    MQTT_CLIENT.publish(bridge_topic(), json.dumps(message), qos=1)
 
 
-def db():
-    return mysql.connector.connect(**MYSQL_CONFIG)
+def publish_simcheck_response(request_id, simulation_id, status):
+    publish_bridge(
+        {
+            "kind": "simcheck_resp",
+            "src": "pc2",
+            "request_id": request_id,
+            "simulation_id": simulation_id,
+            "status": status,
+        }
+    )
 
 
-def stage2_topic(): return f"pisid_pc2_stage2_{GROUP_ID}"
-def ack_topic(): return f"pisid_pc2_ack_{GROUP_ID}"
-def simcheck_req_topic(): return f"pisid_simcheck_req_{GROUP_ID}"
-def simcheck_resp_topic(): return f"pisid_simcheck_resp_{GROUP_ID}"
-def game_end_topic(): return f"pisid_game_end_{GROUP_ID}"
+def publish_receipt(simulation_id, seq, event_id, state, error=None):
+    publish_bridge(
+        {
+            "kind": "receipt",
+            "src": "pc2",
+            "simulation_id": simulation_id,
+            "seq": seq,
+            "event_id": event_id,
+            "state": state,
+            "error": error,
+        }
+    )
+
+
+def publish_game_end(simulation_id):
+    publish_bridge({"kind": "game_end", "src": "pc2", "simulation_id": simulation_id})
+    print(f"A simulacao terminada {simulation_id} com sucesso")
 
 
 def topic_to_event_type(topic: str) -> str:
@@ -85,34 +111,26 @@ def check_simulation(simulation_id):
     conn = db()
     cur = conn.cursor()
     try:
-        cur.execute(
-            "SELECT Estado FROM Simulacao WHERE IDSimulacao = %s LIMIT 1",
-            (simulation_id,),
-        )
+        cur.execute("SELECT Estado FROM Simulacao WHERE IDSimulacao = %s LIMIT 1", (simulation_id,))
         row = cur.fetchone()
-
         if not row:
             return f"A simulacao {simulation_id} nao existe"
-
         estado = row[0]
-
         if estado == "PorIniciar":
             return f"A simulacao {simulation_id} nao esta iniciada"
         if estado == "Terminada":
             return f"A simulacao {simulation_id} ja foi terminada"
-
         return "ok"
     finally:
         cur.close()
         conn.close()
 
+
 def simulation_finished(cur, simulation_id):
-    cur.execute(
-        "SELECT Estado FROM Simulacao WHERE IDSimulacao = %s LIMIT 1",
-        (simulation_id,),
-    )
+    cur.execute("SELECT Estado FROM Simulacao WHERE IDSimulacao = %s LIMIT 1", (simulation_id,))
     row = cur.fetchone()
     return bool(row and row[0] == "Terminada")
+
 
 def load_expected_seq(sim_id):
     conn = db()
@@ -133,45 +151,25 @@ def load_expected_seq(sim_id):
         cur.close()
         conn.close()
 
-def publish_simcheck_response(request_id, status):
-    MQTT_CLIENT.publish(simcheck_resp_topic(), json.dumps({"request_id": request_id, "status": status}), qos=1)
-
-
-def publish_ack(simulation_id, seq, result, error=None):
-    MQTT_CLIENT.publish(
-        ack_topic(),
-        json.dumps({"simulation_id": simulation_id, "seq": seq, "result": result, "error": error}),
-        qos=1,
-    )
-
-
-def publish_game_end(simulation_id):
-    MQTT_CLIENT.publish(game_end_topic(), json.dumps({"simulation_id": simulation_id}), qos=1)
-    print(f"A simulacao terminada{simulation_id} com sucesso")
-
 
 def parse_event_time(value):
     if isinstance(value, datetime):
         return value
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value)
-
     text = str(value).strip()
     if not text:
         raise InvalidEventError("Hour invalid")
-
     try:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
     except Exception:
         pass
-
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%H:%M:%S"):
         try:
             parsed = datetime.strptime(text, fmt)
             return datetime.combine(date.today(), parsed.time()) if fmt == "%H:%M:%S" else parsed
         except Exception:
             pass
-
     raise InvalidEventError("Hour invalid")
 
 
@@ -179,11 +177,9 @@ def validate_event(msg_data):
     event_type = topic_to_event_type(msg_data["topic"])
     payload = msg_data["payload"]
     spec = EVENT_SPECS[event_type]
-
     for field in spec["required"]:
         if payload.get(field) in (None, ""):
             raise InvalidEventError(f"{event_type.capitalize()} event missing {field}")
-
     try:
         return spec["parser"](payload)
     except KeyError as e:
@@ -217,20 +213,14 @@ def finalize_success(conn, cur, sim_id, seq, event_id):
     if sim_id not in finished_sent and simulation_finished(cur, sim_id):
         finished_sent.add(sim_id)
         publish_game_end(sim_id)
-    publish_ack(sim_id, seq, "success")
+    publish_receipt(sim_id, seq, event_id, "done")
     return True
 
 
 def finalize_invalid(conn, cur, sim_id, seq, event_id, sensor, message):
-    cur.callproc("sp_log_message",
-        (
-            sim_id,
-            sensor or "system",
-            "DADO_INVALIDO",
-            str(message)[:255],
-            datetime.now(),
-            None,
-        ),
+    cur.callproc(
+        "sp_log_message",
+        (sim_id, sensor or "system", "DADO_INVALIDO", str(message)[:255], datetime.now(), None),
     )
     mark_event(cur, event_id, "INVALID", message)
     conn.commit()
@@ -238,7 +228,7 @@ def finalize_invalid(conn, cur, sim_id, seq, event_id, sensor, message):
     if sim_id not in finished_sent and simulation_finished(cur, sim_id):
         finished_sent.add(sim_id)
         publish_game_end(sim_id)
-    publish_ack(sim_id, seq, "invalid", message)
+    publish_receipt(sim_id, seq, event_id, "invalid", message)
     return True
 
 
@@ -246,7 +236,6 @@ def process_stage2_message(msg_data):
     sim_id = int(msg_data["simulation_id"])
     seq = int(msg_data["seq"])
     event_id = msg_data["event_id"]
-
     conn = db()
     cur = conn.cursor()
     event_type = None
@@ -264,17 +253,14 @@ def process_stage2_message(msg_data):
         )
         if cur.rowcount == 0:
             conn.rollback()
-            publish_ack(sim_id, seq, "success")
+            publish_receipt(sim_id, seq, event_id, "done")
             return True
-
         sim_status = check_simulation(sim_id)
         if sim_status != "ok":
             return finalize_invalid(conn, cur, sim_id, seq, event_id, event_type, sim_status)
-
         event_data = validate_event(msg_data)
         dispatch_event(cur, sim_id, event_data)
         return finalize_success(conn, cur, sim_id, seq, event_id)
-
     except InvalidEventError as e:
         return finalize_invalid(conn, cur, sim_id, seq, event_id, event_type, str(e))
     except mysql.connector.Error as e:
@@ -296,16 +282,14 @@ def handle_stage2_sequence(msg_data):
     sim_id = int(msg_data["simulation_id"])
     seq = int(msg_data["seq"])
     state = sim_states.setdefault(sim_id, {"expected": load_expected_seq(sim_id), "buf": {}})
-
     if seq < state["expected"]:
-        publish_ack(sim_id, seq, "success")
+        publish_receipt(sim_id, seq, msg_data["event_id"], "done")
         return
     if seq > state["expected"]:
         state["buf"][seq] = msg_data
         return
     if not process_stage2_message(msg_data):
         return
-
     state["expected"] += 1
     while state["expected"] in state["buf"]:
         next_msg = state["buf"].pop(state["expected"])
@@ -317,17 +301,20 @@ def handle_stage2_sequence(msg_data):
 def on_message(client, userdata, msg):
     try:
         payload = json.loads(msg.payload.decode())
-        if msg.topic == simcheck_req_topic():
-            publish_simcheck_response(payload["request_id"], check_simulation(int(payload["simulation_id"])))
-        elif msg.topic == stage2_topic():
+        if msg.topic != bridge_topic() or payload.get("src") == "pc2":
+            return
+        kind = payload.get("kind")
+        if kind == "simcheck_req":
+            sim_id = int(payload["simulation_id"])
+            publish_simcheck_response(payload["request_id"], sim_id, check_simulation(sim_id))
+        elif kind == "event":
             handle_stage2_sequence(payload)
     except Exception as e:
         print("Erro PC2:", e)
 
 
 def on_connect(client, userdata, flags, reason_code, properties):
-    client.subscribe(simcheck_req_topic(), qos=1)
-    client.subscribe(stage2_topic(), qos=1)
+    client.subscribe(bridge_topic(), qos=1)
 
 
 def main():
@@ -337,7 +324,6 @@ def main():
     MQTT_CLIENT.on_message = on_message
     MQTT_CLIENT.connect(BROKER, PORT)
     MQTT_CLIENT.loop_forever()
-
 
 if __name__ == "__main__":
     try:
