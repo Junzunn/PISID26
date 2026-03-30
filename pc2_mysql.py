@@ -44,7 +44,7 @@ EVENT_SPECS = {
         "required": ("Player", "Marsami", "RoomOrigin", "RoomDestiny", "Status"),
         "parser": lambda p: {
             "type": "movement",
-            "hora": parse_event_time(p["Hour"]) if p.get("Hour") else None,
+            "hora": parse_event_time(p["Hour"]) if p.get("Hour") else datetime.now(),
             "player": int(p["Player"]),
             "marsami": int(p["Marsami"]),
             "origin": int(p["RoomOrigin"]),
