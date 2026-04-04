@@ -69,18 +69,6 @@ def publish_bridge(message: dict):
     MQTT_CLIENT.publish(bridge_topic(), json.dumps(message), qos=1)
 
 
-def publish_simcheck_response(request_id, simulation_id, status):
-    publish_bridge(
-        {
-            "kind": "simcheck_resp",
-            "src": "pc2",
-            "request_id": request_id,
-            "simulation_id": simulation_id,
-            "status": status,
-        }
-    )
-
-
 def publish_receipt(simulation_id, seq, event_id, state, error=None):
     publish_bridge(
         {
@@ -105,25 +93,6 @@ def topic_to_event_type(topic: str) -> str:
         if marker in topic:
             return event_type
     raise InvalidEventError(f"Unknown topic: {topic}")
-
-
-def check_simulation(simulation_id):
-    conn = db()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT Estado FROM Simulacao WHERE IDSimulacao = %s LIMIT 1", (simulation_id,))
-        row = cur.fetchone()
-        if not row:
-            return f"A simulacao {simulation_id} nao existe"
-        estado = row[0]
-        if estado == "PorIniciar":
-            return f"A simulacao {simulation_id} nao esta iniciada"
-        if estado == "Terminada":
-            return f"A simulacao {simulation_id} ja foi terminada"
-        return "ok"
-    finally:
-        cur.close()
-        conn.close()
 
 
 def simulation_finished(cur, simulation_id):
@@ -255,9 +224,7 @@ def process_stage2_message(msg_data):
             conn.rollback()
             publish_receipt(sim_id, seq, event_id, "done")
             return True
-        sim_status = check_simulation(sim_id)
-        if sim_status != "ok":
-            return finalize_invalid(conn, cur, sim_id, seq, event_id, event_type, sim_status)
+
         event_data = validate_event(msg_data)
         dispatch_event(cur, sim_id, event_data)
         return finalize_success(conn, cur, sim_id, seq, event_id)
@@ -303,11 +270,7 @@ def on_message(client, userdata, msg):
         payload = json.loads(msg.payload.decode())
         if msg.topic != bridge_topic() or payload.get("src") == "pc2":
             return
-        kind = payload.get("kind")
-        if kind == "simcheck_req":
-            sim_id = int(payload["simulation_id"])
-            publish_simcheck_response(payload["request_id"], sim_id, check_simulation(sim_id))
-        elif kind == "event":
+        if payload.get("kind") == "event":
             handle_stage2_sequence(payload)
     except Exception as e:
         print("Erro PC2:", e)

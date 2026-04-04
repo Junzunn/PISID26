@@ -2,10 +2,10 @@
 -- version 5.2.1
 -- https://www.phpmyadmin.net/
 --
--- Host: localhost
--- Generation Time: Mar 27, 2026 at 12:06 AM
--- Server version: 10.4.28-MariaDB
--- PHP Version: 8.2.4
+-- 主机： localhost
+-- 生成日期： 2026-04-05 00:17:54
+-- 服务器版本： 10.4.28-MariaDB
+-- PHP 版本： 8.2.4
 
 SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
 START TRANSACTION;
@@ -18,12 +18,12 @@ SET time_zone = "+00:00";
 /*!40101 SET NAMES utf8mb4 */;
 
 --
--- Database: `pisid`
+-- 数据库： `pisid`
 --
 
 DELIMITER $$
 --
--- Procedures
+-- 存储过程
 --
 CREATE DEFINER=`root`@`localhost` PROCEDURE `simulacao_atualizar` (IN `p_idSimulacao` INT, IN `p_descricao` TEXT)  MODIFIES SQL DATA BEGIN
     DECLARE v_current_username VARCHAR(50);
@@ -126,10 +126,11 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `simulacao_bloquear` (IN `p_idSimula
     );
 END$$
 
-CREATE DEFINER=`root`@`localhost` PROCEDURE `simulacao_criar` (IN `p_nome` VARCHAR(100), IN `p_data_hora` DATETIME, IN `p_duracao_seg` INT)   proc: BEGIN
+CREATE DEFINER=`root`@`localhost` PROCEDURE `simulacao_criar` (IN `p_descricao` TEXT)   proc: BEGIN
     DECLARE v_user_id INT;
     DECLARE v_exists INT DEFAULT 0;
     DECLARE v_current_username VARCHAR(50);
+    DECLARE v_descricao_final TEXT;
 
     SET v_current_username = SUBSTRING_INDEX(USER(), '@', 1);
 
@@ -150,34 +151,25 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `simulacao_criar` (IN `p_nome` VARCH
      WHERE Username = v_current_username
      LIMIT 1;
 
-    IF p_nome IS NULL OR TRIM(p_nome) = '' THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Nome da simulacao invalido.';
-    END IF;
-
-    IF p_data_hora IS NULL THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Data/hora da simulacao invalida.';
-    END IF;
-
-    IF p_duracao_seg IS NULL OR p_duracao_seg <= 0 THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Duracao da simulacao invalida.';
+    IF p_descricao IS NULL OR TRIM(p_descricao) = '' THEN
+        SET v_descricao_final = NULL;
+    ELSE
+        SET v_descricao_final = p_descricao;
     END IF;
 
     INSERT INTO Simulacao (
+        IDUtilizadorCriador,
         Descricao,
-        DataHorainicio,
+        DataHoraInicio,
         DataHoraFim,
-        Estado,
-        IDUtilizadorCriador
+        Estado
     )
     VALUES (
-        p_nome,
+        v_user_id,
+        v_descricao_final,
         NULL,
         NULL,
-        'PorIniciar',
-        v_user_id
+        'PorIniciar'
     );
 END$$
 
@@ -309,21 +301,21 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `simulacao_terminar` (IN `p_idSimula
 END$$
 
 CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_log_message` (IN `p_id_simulacao` INT, IN `p_sensor` VARCHAR(50), IN `p_tipo_alerta` VARCHAR(100), IN `p_msg` TEXT, IN `p_hora_evento` DATETIME, IN `p_valor` DECIMAL(10,2))   proc: BEGIN
-    DECLARE v_last_alert_time DATETIME DEFAULT NULL;
+    DECLARE v_last_event_time DATETIME DEFAULT NULL;
 
     IF p_hora_evento IS NULL THEN
         SET p_hora_evento = NOW();
     END IF;
 
     IF p_tipo_alerta LIKE 'ALERTA\_%' THEN
-        SELECT MAX(HoraEscrita)
-          INTO v_last_alert_time
+        SELECT MAX(Hora)
+          INTO v_last_event_time
           FROM Mensagens
          WHERE IDSimulacao = p_id_simulacao
            AND TipoAlerta = p_tipo_alerta;
 
-        IF v_last_alert_time IS NOT NULL
-           AND TIMESTAMPDIFF(SECOND, v_last_alert_time, NOW()) < 17 THEN
+        IF v_last_event_time IS NOT NULL
+           AND TIMESTAMPDIFF(SECOND, v_last_event_time, p_hora_evento) < 17 THEN
             LEAVE proc;
         END IF;
     END IF;
@@ -331,7 +323,6 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_log_message` (IN `p_id_simulacao
     INSERT INTO Mensagens
     (
         Hora,
-        Sala,
         Sensor,
         Leitura,
         TipoAlerta,
@@ -342,7 +333,6 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_log_message` (IN `p_id_simulacao
     VALUES
     (
         p_hora_evento,
-        NULL,
         p_sensor,
         p_valor,
         p_tipo_alerta,
@@ -355,36 +345,8 @@ END$$
 CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_id` INT, IN `p_player` INT, IN `p_marsami` INT, IN `p_origin` INT, IN `p_destiny` INT, IN `p_status` INT, IN `p_hora` DATETIME)   BEGIN
     DECLARE v_exists INT DEFAULT 0;
     DECLARE v_tipo VARCHAR(4);
-    DECLARE v_current_room INT DEFAULT NULL;
     DECLARE v_total_marsamis INT DEFAULT 0;
-    DECLARE v_last_alert_time DATETIME DEFAULT NULL;
-    DECLARE v_sim_estado VARCHAR(20) DEFAULT NULL;
-
-    IF p_hora IS NULL THEN
-        SET p_hora = NOW();
-    END IF;
-
-    SELECT Estado
-      INTO v_sim_estado
-      FROM Simulacao
-     WHERE IDSimulacao = p_sim_id
-     LIMIT 1;
-
-    IF v_sim_estado IS NULL THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Movement invalid: simulation does not exist';
-    END IF;
-
-    IF v_sim_estado NOT IN ('ACorrer', 'Blocked') THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Movement invalid: simulation is not accepting movement events';
-    END IF;
-
-    IF v_sim_estado = 'Blocked'
-       AND NOT (p_origin = 0 AND p_destiny = 0 AND p_status = 2) THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Movement invalid: blocked simulation only accepts fatigue events (origin=0, destiny=0, status=2)';
-    END IF;
+    DECLARE v_last_room_alert_time DATETIME DEFAULT NULL;
 
     SELECT COUNT(*)
       INTO v_exists
@@ -393,11 +355,6 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_
        AND IDMarsami = p_marsami;
 
     IF v_exists = 0 THEN
-
-        IF p_origin <> 0 OR p_destiny = 0 OR p_status <> 1 THEN
-            SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'Movement invalid: first event must be initial placement (origin=0, destiny>0, status=1)';
-        END IF;
 
         IF MOD(p_marsami, 2) = 0 THEN
             SET v_tipo = 'even';
@@ -460,7 +417,7 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_
             IF(v_tipo = 'even', 1, 0)
         )
         ON DUPLICATE KEY UPDATE
-            NumeroOdds = NumeroOdds + IF(v_tipo = 'odd', 1, 0),
+            NumeroOdds  = NumeroOdds + IF(v_tipo = 'odd', 1, 0),
             NumeroEvens = NumeroEvens + IF(v_tipo = 'even', 1, 0);
 
         SELECT COALESCE(NumeroOdds, 0) + COALESCE(NumeroEvens, 0)
@@ -470,15 +427,15 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_
            AND Sala = p_destiny;
 
         IF v_total_marsamis >= 6 THEN
-            SELECT MAX(HoraEscrita)
-              INTO v_last_alert_time
+            SELECT MAX(Hora)
+              INTO v_last_room_alert_time
               FROM Mensagens
              WHERE IDSimulacao = p_sim_id
                AND TipoAlerta = 'ALERTA_SALA_CHEIA'
-               AND COALESCE(Msg, '') LIKE CONCAT('%sala ', p_destiny, '%');
+               AND COALESCE(Msg, '') LIKE CONCAT('%Sala ', p_destiny, ' %');
 
-            IF v_last_alert_time IS NULL
-               OR TIMESTAMPDIFF(SECOND, v_last_alert_time, NOW()) > 10 THEN
+            IF v_last_room_alert_time IS NULL
+               OR TIMESTAMPDIFF(SECOND, v_last_room_alert_time, p_hora) >= 10 THEN
                 CALL sp_log_message(
                     p_sim_id,
                     'movement',
@@ -492,33 +449,33 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_
 
     ELSE
 
-        SELECT SalaAtual, Tipo
-          INTO v_current_room, v_tipo
+        SELECT Tipo
+          INTO v_tipo
           FROM Marsami
          WHERE IDSimulacao = p_sim_id
            AND IDMarsami = p_marsami
          LIMIT 1;
 
-        IF p_origin = 0 AND p_destiny = 0 THEN
+        INSERT INTO MedicoesPassagens
+        (
+            Hora,
+            SalaOrigem,
+            SalaDestino,
+            Marsami,
+            Status,
+            IDSimulacao
+        )
+        VALUES
+        (
+            p_hora,
+            p_origin,
+            p_destiny,
+            p_marsami,
+            p_status,
+            p_sim_id
+        );
 
-            INSERT INTO MedicoesPassagens
-            (
-                Hora,
-                SalaOrigem,
-                SalaDestino,
-                Marsami,
-                Status,
-                IDSimulacao
-            )
-            VALUES
-            (
-                p_hora,
-                p_origin,
-                p_destiny,
-                p_marsami,
-                p_status,
-                p_sim_id
-            );
+        IF p_origin = 0 AND p_destiny = 0 THEN
 
             UPDATE Marsami
                SET Estado = p_status,
@@ -527,30 +484,6 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_
                AND IDMarsami = p_marsami;
 
         ELSE
-
-            IF p_origin <> v_current_room THEN
-                SIGNAL SQLSTATE '45000'
-                SET MESSAGE_TEXT = 'Movement invalid: RoomOrigin does not match Marsami current room';
-            END IF;
-
-            INSERT INTO MedicoesPassagens
-            (
-                Hora,
-                SalaOrigem,
-                SalaDestino,
-                Marsami,
-                Status,
-                IDSimulacao
-            )
-            VALUES
-            (
-                p_hora,
-                p_origin,
-                p_destiny,
-                p_marsami,
-                p_status,
-                p_sim_id
-            );
 
             INSERT INTO OcupacaoLabirinto
             (
@@ -602,15 +535,15 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_
                AND Sala = p_destiny;
 
             IF v_total_marsamis >= 6 THEN
-                SELECT MAX(HoraEscrita)
-                  INTO v_last_alert_time
+                SELECT MAX(Hora)
+                  INTO v_last_room_alert_time
                   FROM Mensagens
                  WHERE IDSimulacao = p_sim_id
                    AND TipoAlerta = 'ALERTA_SALA_CHEIA'
-                   AND COALESCE(Msg, '') LIKE CONCAT('%sala ', p_destiny, '%');
+                   AND COALESCE(Msg, '') LIKE CONCAT('%Sala ', p_destiny, ' %');
 
-                IF v_last_alert_time IS NULL
-                   OR TIMESTAMPDIFF(SECOND, v_last_alert_time, NOW()) > 10 THEN
+                IF v_last_room_alert_time IS NULL
+                   OR TIMESTAMPDIFF(SECOND, v_last_room_alert_time, p_hora) >= 10 THEN
                     CALL sp_log_message(
                         p_sim_id,
                         'movement',
@@ -639,7 +572,7 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_
     THEN
         UPDATE Simulacao
            SET Estado = 'Terminada',
-               DataHoraFim = COALESCE(DataHoraFim, NOW())
+               DataHoraFim = COALESCE(DataHoraFim, p_hora)
          WHERE IDSimulacao = p_sim_id
            AND Estado <> 'Terminada';
     END IF;
@@ -921,9 +854,9 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_tentar_score` (IN `p_id_simulaca
     DECLARE v_id_utilizador INT;
     DECLARE v_odd INT DEFAULT 0;
     DECLARE v_even INT DEFAULT 0;
-    DECLARE v_tentativa_atual INT DEFAULT 0;
+    DECLARE v_tentativas_usadas INT DEFAULT 0;
+    DECLARE v_num_tentativa INT DEFAULT 0;
     DECLARE v_exists INT DEFAULT 0;
-    DECLARE v_id_score INT DEFAULT NULL;
     DECLARE v_delta_pontos DECIMAL(4,2) DEFAULT 0.0;
     DECLARE v_resultado VARCHAR(10);
     DECLARE v_current_username VARCHAR(50);
@@ -971,7 +904,7 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_tentar_score` (IN `p_id_simulaca
         SET MESSAGE_TEXT = 'Nao tem permissao para pontuar esta simulacao.';
     END IF;
 
-    IF v_estado <> 'ACorrer' AND v_estado <> 'Blocked' THEN
+    IF v_estado NOT IN ('ACorrer', 'Blocked') THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'A simulacao nao esta num estado valido para pontuar.';
     END IF;
@@ -994,18 +927,19 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_tentar_score` (IN `p_id_simulaca
        AND Sala = p_sala
      LIMIT 1;
 
-    SELECT IDScore, COALESCE(Tentativa, 0)
-      INTO v_id_score, v_tentativa_atual
+    SELECT COUNT(*)
+      INTO v_tentativas_usadas
       FROM ScoreSala
      WHERE IDSimulacao = p_id_simulacao
-       AND Sala = p_sala
-     ORDER BY IDScore DESC
-     LIMIT 1;
+       AND IDUtilizador = v_id_utilizador
+       AND Sala = p_sala;
 
-    IF v_tentativa_atual >= 3 THEN
+    IF v_tentativas_usadas >= 3 THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Numero maximo de tentativas para esta sala atingido.';
     END IF;
+
+    SET v_num_tentativa = v_tentativas_usadas + 1;
 
     IF v_odd = v_even AND v_odd <> 0 THEN
         SET v_delta_pontos = 1.0;
@@ -1015,34 +949,24 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_tentar_score` (IN `p_id_simulaca
         SET v_resultado = 'FALHADO';
     END IF;
 
-    IF v_id_score IS NULL THEN
-        INSERT INTO ScoreSala (
-            IDSimulacao,
-            PlayerID,
-            Sala,
-            Tentativa,
-            Hora,
-            Resultado,
-            Pontos
-        )
-        VALUES (
-            p_id_simulacao,
-            v_id_utilizador,
-            p_sala,
-            1,
-            NOW(),
-            v_resultado,
-            v_delta_pontos
-        );
-    ELSE
-        UPDATE ScoreSala
-           SET Tentativa = Tentativa + 1,
-               Hora = NOW(),
-               Resultado = v_resultado,
-               Pontos = COALESCE(Pontos, 0) + v_delta_pontos,
-               PlayerID = v_id_utilizador
-         WHERE IDScore = v_id_score;
-    END IF;
+    INSERT INTO ScoreSala (
+        IDSimulacao,
+        IDUtilizador,
+        Sala,
+        NumTentativa,
+        Hora,
+        Resultado,
+        Pontos
+    )
+    VALUES (
+        p_id_simulacao,
+        v_id_utilizador,
+        p_sala,
+        v_num_tentativa,
+        NOW(),
+        v_resultado,
+        v_delta_pontos
+    );
 
     CALL sp_log_message(
         p_id_simulacao,
@@ -1052,19 +976,23 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_tentar_score` (IN `p_id_simulaca
             ELSE 'SCORE_FALHADO'
         END,
         CONCAT(
-            'Tentativa de score na sala ',
+            'Tentativa ',
+            v_num_tentativa,
+            ' de score na sala ',
             p_sala,
-            ' | odd=', v_odd,
-            ' even=', v_even
+            ' | odd=',
+            v_odd,
+            ' even=',
+            v_even
         ),
         NOW(),
         v_delta_pontos
     );
 END$$
 
-CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizadorAdmin_alterar_dados` (IN `p_username` VARCHAR(50), IN `p_novo_nome` VARCHAR(100), IN `p_novo_telemovel` VARCHAR(12), IN `p_novo_tipo` VARCHAR(10), IN `p_novo_email` VARCHAR(50), IN `p_nova_data_nascimento` DATE, IN `p_nova_equipa` INT, IN `p_nova_password` VARCHAR(50))  MODIFIES SQL DATA BEGIN
+CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizadorAdmin_alterar_dados` (IN `p_username` VARCHAR(50), IN `p_novo_nome` VARCHAR(100), IN `p_novo_telemovel` VARCHAR(12), IN `p_novo_tipo` VARCHAR(20), IN `p_novo_email` VARCHAR(50), IN `p_nova_data_nascimento` DATE, IN `p_nova_equipa` INT, IN `p_nova_password` VARCHAR(50))  MODIFIES SQL DATA BEGIN
     DECLARE v_current_username VARCHAR(50);
-    DECLARE v_current_tipo VARCHAR(10);
+    DECLARE v_current_tipo VARCHAR(20);
     DECLARE v_user_exists INT DEFAULT 0;
     DECLARE v_email_exists INT DEFAULT 0;
 
@@ -1081,9 +1009,9 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizadorAdmin_alterar_dados` (IN 
         SET MESSAGE_TEXT = 'Acesso negado: utilizador autenticado nao existe na tabela Utilizador.';
     END IF;
 
-    IF v_current_tipo <> 'Admin' THEN
+    IF v_current_tipo <> 'AdminApp' THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Sem permissao: apenas Admin pode alterar dados de outros utilizadores.';
+        SET MESSAGE_TEXT = 'Sem permissao: apenas AdminApp pode alterar dados de outros utilizadores.';
     END IF;
 
     SELECT COUNT(*)
@@ -1096,9 +1024,10 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizadorAdmin_alterar_dados` (IN 
         SET MESSAGE_TEXT = 'O username indicado nao existe.';
     END IF;
 
-    IF p_novo_tipo IS NOT NULL AND p_novo_tipo NOT IN ('Admin', 'User', 'Script') THEN
+    IF p_novo_tipo IS NOT NULL
+       AND p_novo_tipo NOT IN ('AdminApp', 'Investigador', 'Tecnico', 'Script') THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Tipo invalido. Use Admin, User ou Script.';
+        SET MESSAGE_TEXT = 'Tipo invalido. Use AdminApp, Investigador, Tecnico ou Script.';
     END IF;
 
     IF p_novo_nome IS NULL
@@ -1134,7 +1063,6 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizadorAdmin_alterar_dados` (IN 
            Equipa = COALESCE(p_nova_equipa, Equipa),
            Password = COALESCE(p_nova_password, Password)
      WHERE Username = p_username;
-
 END$$
 
 CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizador_alterar_proprios_dados` (IN `p_NovoNome` VARCHAR(100), IN `p_NovoTelemovel` VARCHAR(12), IN `p_NovoEmail` VARCHAR(50), IN `p_NovaDataNascimento` DATE, IN `p_NovaEquipa` INT, IN `p_NovaPassword` VARCHAR(50))  MODIFIES SQL DATA BEGIN
@@ -1188,13 +1116,13 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizador_alterar_proprios_dados` 
     WHERE Username = v_username;
 END$$
 
-CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizador_criar` (IN `p_username` VARCHAR(50), IN `p_nome` VARCHAR(100), IN `p_telemovel` VARCHAR(12), IN `p_tipo` VARCHAR(10), IN `p_email` VARCHAR(50), IN `p_dataNascimento` DATE, IN `p_equipa` INT, IN `p_password` VARCHAR(50))  MODIFIES SQL DATA BEGIN
+CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizador_criar` (IN `p_username` VARCHAR(50), IN `p_nome` VARCHAR(100), IN `p_telemovel` VARCHAR(12), IN `p_tipo` VARCHAR(20), IN `p_email` VARCHAR(50), IN `p_dataNascimento` DATE, IN `p_equipa` INT, IN `p_password` VARCHAR(50))  MODIFIES SQL DATA BEGIN
     DECLARE v_count INT DEFAULT 0;
     DECLARE v_role_name VARCHAR(20);
 
-    IF p_tipo NOT IN ('Admin', 'User', 'Script') THEN
+    IF p_tipo NOT IN ('AdminApp', 'Investigador', 'Tecnico', 'Script') THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Tipo de utilizador invalido. Use Admin, User ou Script.';
+        SET MESSAGE_TEXT = 'Tipo de utilizador invalido. Use AdminApp, Investigador, Tecnico ou Script.';
     END IF;
 
     SELECT COUNT(*)
@@ -1247,10 +1175,12 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizador_criar` (IN `p_username` 
     EXECUTE stmt1;
     DEALLOCATE PREPARE stmt1;
 
-    IF p_tipo = 'Admin' THEN
+    IF p_tipo = 'AdminApp' THEN
         SET v_role_name = 'role_admin';
-    ELSEIF p_tipo = 'User' THEN
+    ELSEIF p_tipo = 'Investigador' THEN
         SET v_role_name = 'role_user';
+    ELSEIF p_tipo = 'Tecnico' THEN
+        SET v_role_name = 'role_tecnico';
     ELSE
         SET v_role_name = 'role_script';
     END IF;
@@ -1274,31 +1204,31 @@ END$$
 
 CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizador_eliminar` (IN `p_username` VARCHAR(50))  MODIFIES SQL DATA BEGIN
     DECLARE v_current_username VARCHAR(50);
-    DECLARE v_current_tipo VARCHAR(10);
+    DECLARE v_current_tipo VARCHAR(20);
     DECLARE v_user_exists INT DEFAULT 0;
 
     SET v_current_username = SUBSTRING_INDEX(USER(), '@', 1);
 
     SELECT Tipo
-    INTO v_current_tipo
-    FROM Utilizador
-    WHERE Username = v_current_username
-    LIMIT 1;
+      INTO v_current_tipo
+      FROM Utilizador
+     WHERE Username = v_current_username
+     LIMIT 1;
 
     IF v_current_tipo IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Acesso negado: utilizador autenticado nao existe na tabela Utilizador.';
     END IF;
 
-    IF v_current_tipo <> 'Admin' THEN
+    IF v_current_tipo <> 'AdminApp' THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Sem permissao: apenas Admin pode eliminar utilizadores.';
+        SET MESSAGE_TEXT = 'Sem permissao: apenas AdminApp pode eliminar utilizadores.';
     END IF;
 
     SELECT COUNT(*)
-    INTO v_user_exists
-    FROM Utilizador
-    WHERE Username = p_username;
+      INTO v_user_exists
+      FROM Utilizador
+     WHERE Username = p_username;
 
     IF v_user_exists = 0 THEN
         SIGNAL SQLSTATE '45000'
@@ -1311,9 +1241,11 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `utilizador_eliminar` (IN `p_usernam
     END IF;
 
     DELETE FROM Utilizador
-    WHERE Username = p_username;
+     WHERE Username = p_username;
 
-    SET @sql_drop_user = CONCAT('DROP USER IF EXISTS ''', p_username, '''@''localhost''');
+    SET @sql_drop_user = CONCAT(
+        'DROP USER IF EXISTS ''', p_username, '''@''localhost'''
+    );
     PREPARE stmt FROM @sql_drop_user;
     EXECUTE stmt;
     DEALLOCATE PREPARE stmt;
@@ -1326,7 +1258,7 @@ DELIMITER ;
 -- --------------------------------------------------------
 
 --
--- Table structure for table `Corridor`
+-- 表的结构 `Corridor`
 --
 
 CREATE TABLE `Corridor` (
@@ -1338,7 +1270,7 @@ CREATE TABLE `Corridor` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
--- Dumping data for table `Corridor`
+-- 转存表中的数据 `Corridor`
 --
 
 INSERT INTO `Corridor` (`ID`, `RoomOrigin`, `RoomDestiny`, `Active`, `Distance`) VALUES
@@ -1361,7 +1293,7 @@ INSERT INTO `Corridor` (`ID`, `RoomOrigin`, `RoomDestiny`, `Active`, `Distance`)
 -- --------------------------------------------------------
 
 --
--- Table structure for table `EventosProcessados`
+-- 表的结构 `EventosProcessados`
 --
 
 CREATE TABLE `EventosProcessados` (
@@ -1374,7 +1306,7 @@ CREATE TABLE `EventosProcessados` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
--- Dumping data for table `EventosProcessados`
+-- 转存表中的数据 `EventosProcessados`
 --
 
 INSERT INTO `EventosProcessados` (`EventID`, `IDSimulacao`, `TipoEvento`, `EstadoProcessamento`, `ProcessedAt`, `ErrorMessage`) VALUES
@@ -2701,7 +2633,7 @@ INSERT INTO `EventosProcessados` (`EventID`, `IDSimulacao`, `TipoEvento`, `Estad
 -- --------------------------------------------------------
 
 --
--- Table structure for table `Marsami`
+-- 表的结构 `Marsami`
 --
 
 CREATE TABLE `Marsami` (
@@ -2715,7 +2647,7 @@ CREATE TABLE `Marsami` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
--- Dumping data for table `Marsami`
+-- 转存表中的数据 `Marsami`
 --
 
 INSERT INTO `Marsami` (`IDMarsami`, `Player`, `IDSimulacao`, `SalaAtual`, `Tipo`, `Estado`, `UltimaHoraMovimento`) VALUES
@@ -2933,7 +2865,7 @@ INSERT INTO `Marsami` (`IDMarsami`, `Player`, `IDSimulacao`, `SalaAtual`, `Tipo`
 -- --------------------------------------------------------
 
 --
--- Table structure for table `MedicoesPassagens`
+-- 表的结构 `MedicoesPassagens`
 --
 
 CREATE TABLE `MedicoesPassagens` (
@@ -2947,7 +2879,7 @@ CREATE TABLE `MedicoesPassagens` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
--- Dumping data for table `MedicoesPassagens`
+-- 转存表中的数据 `MedicoesPassagens`
 --
 
 INSERT INTO `MedicoesPassagens` (`IDMedicao`, `Hora`, `SalaOrigem`, `SalaDestino`, `Marsami`, `Status`, `IDSimulacao`) VALUES
@@ -3462,13 +3394,15 @@ INSERT INTO `MedicoesPassagens` (`IDMedicao`, `Hora`, `SalaOrigem`, `SalaDestino
 (509, '2026-03-26 15:22:10', 0, 0, 30, 2, 58);
 
 --
--- Triggers `MedicoesPassagens`
+-- 触发器 `MedicoesPassagens`
 --
 DELIMITER $$
 CREATE TRIGGER `before_insert_medicoes_passagens` BEFORE INSERT ON `MedicoesPassagens` FOR EACH ROW BEGIN
     DECLARE v_corridor_exists INT DEFAULT 0;
     DECLARE v_corridor_active TINYINT DEFAULT 0;
     DECLARE v_sim_estado VARCHAR(20) DEFAULT NULL;
+    DECLARE v_marsami_exists INT DEFAULT 0;
+    DECLARE v_current_room INT DEFAULT NULL;
 
     IF NEW.IDSimulacao IS NULL THEN
         SIGNAL SQLSTATE '45000'
@@ -3491,12 +3425,6 @@ CREATE TRIGGER `before_insert_medicoes_passagens` BEFORE INSERT ON `MedicoesPass
         SET MESSAGE_TEXT = 'Movement invalid: simulation is not accepting movement events';
     END IF;
 
-    IF v_sim_estado = 'Blocked'
-       AND NOT (NEW.SalaOrigem = 0 AND NEW.SalaDestino = 0 AND NEW.Status = 2) THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Movement invalid: blocked simulation only accepts fatigue events (origin=0, destiny=0, status=2)';
-    END IF;
-
     IF NEW.Marsami IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Movement invalid: Marsami is NULL';
@@ -3507,7 +3435,7 @@ CREATE TRIGGER `before_insert_medicoes_passagens` BEFORE INSERT ON `MedicoesPass
         SET MESSAGE_TEXT = 'Movement invalid: Status is NULL';
     END IF;
 
-    IF NEW.Status NOT IN (0,1,2) THEN
+    IF NEW.Status NOT IN (0, 1, 2) THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Movement invalid: Status must be 0, 1 or 2';
     END IF;
@@ -3522,7 +3450,7 @@ CREATE TRIGGER `before_insert_medicoes_passagens` BEFORE INSERT ON `MedicoesPass
         SET MESSAGE_TEXT = 'Movement invalid: RoomOrigin/RoomDestiny cannot be negative';
     END IF;
 
-    IF NEW.SalaOrigem = 0 AND NEW.SalaDestino = 0 AND NEW.Status NOT IN (0,2) THEN
+    IF NEW.SalaOrigem = 0 AND NEW.SalaDestino = 0 AND NEW.Status NOT IN (0, 2) THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Movement invalid: (0,0) only allowed with status 0 or 2';
     END IF;
@@ -3535,6 +3463,44 @@ CREATE TRIGGER `before_insert_medicoes_passagens` BEFORE INSERT ON `MedicoesPass
     IF NEW.Status = 1 AND NEW.SalaDestino = 0 THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Movement invalid: status 1 cannot have destination 0';
+    END IF;
+
+    IF v_sim_estado = 'Blocked'
+       AND NOT (NEW.SalaOrigem = 0 AND NEW.SalaDestino = 0 AND NEW.Status = 2) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Movement invalid: blocked simulation only accepts fatigue events (origin=0, destiny=0, status=2)';
+    END IF;
+
+    SELECT COUNT(*)
+      INTO v_marsami_exists
+      FROM Marsami
+     WHERE IDSimulacao = NEW.IDSimulacao
+       AND IDMarsami = NEW.Marsami;
+
+    IF v_marsami_exists = 0 THEN
+        IF NOT (NEW.SalaOrigem = 0 AND NEW.SalaDestino > 0 AND NEW.Status = 1) THEN
+            SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Movement invalid: first event must be initial placement (origin=0, destiny>0, status=1)';
+        END IF;
+    ELSE
+        SELECT SalaAtual
+          INTO v_current_room
+          FROM Marsami
+         WHERE IDSimulacao = NEW.IDSimulacao
+           AND IDMarsami = NEW.Marsami
+         LIMIT 1;
+
+        IF NEW.SalaOrigem = 0 AND NEW.SalaDestino = 0 THEN
+            IF NEW.Status NOT IN (0, 2) THEN
+                SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'Movement invalid: fatigue/inactive event must use status 0 or 2';
+            END IF;
+        ELSE
+            IF NEW.SalaOrigem <> v_current_room THEN
+                SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'Movement invalid: RoomOrigin does not match Marsami current room';
+            END IF;
+        END IF;
     END IF;
 
     IF NEW.SalaOrigem > 0 AND NEW.SalaDestino > 0 THEN
@@ -3561,13 +3527,12 @@ DELIMITER ;
 -- --------------------------------------------------------
 
 --
--- Table structure for table `Mensagens`
+-- 表的结构 `Mensagens`
 --
 
 CREATE TABLE `Mensagens` (
   `ID` int(11) NOT NULL,
   `Hora` timestamp NULL DEFAULT NULL,
-  `Sala` int(11) DEFAULT NULL,
   `Sensor` varchar(50) DEFAULT NULL,
   `Leitura` decimal(10,2) DEFAULT NULL,
   `TipoAlerta` varchar(50) NOT NULL,
@@ -3577,86 +3542,86 @@ CREATE TABLE `Mensagens` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
--- Dumping data for table `Mensagens`
+-- 转存表中的数据 `Mensagens`
 --
 
-INSERT INTO `Mensagens` (`ID`, `Hora`, `Sala`, `Sensor`, `Leitura`, `TipoAlerta`, `Msg`, `HoraEscrita`, `IDSimulacao`) VALUES
-(1, '2026-03-26 15:01:05', NULL, 'movement', 6.00, 'ALERTA_SALA_CHEIA', 'Sala 7 atingiu ocupacao maxima: 6', '2026-03-26 15:01:05', 57),
-(2, '2026-03-26 15:01:23', NULL, 'sound', NULL, 'DADO_INVALIDO', 'Hour invalid', '2026-03-26 15:01:23', 57),
-(3, '2026-03-26 15:01:26', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:26', 57),
-(4, '2026-03-26 15:01:27', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:27', 57),
-(5, '2026-03-26 15:01:28', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:28', 57),
-(6, '2026-03-26 15:01:30', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:30', 57),
-(7, '2026-03-26 15:01:31', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:31', 57),
-(8, '2026-03-26 15:01:32', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:32', 57),
-(9, '2026-03-26 15:01:33', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:33', 57),
-(10, '2026-03-26 15:01:33', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:33', 57),
-(11, '2026-03-26 15:01:34', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:34', 57),
-(12, '2026-03-26 15:01:35', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:35', 57),
-(13, '2026-03-26 15:01:37', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:37', 57),
-(14, '2026-03-26 15:01:37', NULL, 'TEMPERATURE', 19.24, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.24 | median=16.0800 | mad=0.4900 | robust_z=4.3498', '2026-03-26 15:01:38', 57),
-(15, '2026-03-26 15:01:38', NULL, 'TEMPERATURE', 19.43, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.43 | median=16.1600 | mad=0.5650 | robust_z=3.9037', '2026-03-26 15:01:39', 57),
-(16, '2026-03-26 15:01:39', NULL, 'TEMPERATURE', 19.62, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.62 | median=16.2400 | mad=0.6300 | robust_z=3.6187', '2026-03-26 15:01:40', 57),
-(17, '2026-03-26 15:01:40', NULL, 'TEMPERATURE', 19.82, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.82 | median=16.4100 | mad=0.6400 | robust_z=3.5938', '2026-03-26 15:01:41', 57),
-(18, '2026-03-26 15:01:41', NULL, 'TEMPERATURE', 20.02, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=20.02 | median=16.5700 | mad=0.6500 | robust_z=3.5800', '2026-03-26 15:01:42', 57),
-(19, '2026-03-26 15:01:41', NULL, 'TEMPERATURE', 20.02, 'ALERTA_TEMPERATURA', 'High temperature alert', '2026-03-26 15:01:42', 57),
-(20, '2026-03-26 15:01:46', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Hour invalid', '2026-03-26 15:01:46', 57),
-(21, '2026-03-26 15:01:46', NULL, 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:01:46', 57),
-(22, '2026-03-26 15:01:47', NULL, 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:01:47', 57),
-(23, '2026-03-26 15:01:48', NULL, 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:01:48', 57),
-(24, '2026-03-26 15:01:53', NULL, 'SOUND', 22.08, 'ALERTA_SOM', 'High sound alert', '2026-03-26 15:01:53', 57),
-(25, '2026-03-26 15:01:58', NULL, 'TEMPERATURE', 23.47, 'ALERTA_TEMPERATURA', 'High temperature alert', '2026-03-26 15:01:59', 57),
-(26, '2026-03-26 15:02:05', NULL, 'SOUND', 27.45, 'BLOQUEIO_SOM', 'Maximum sound reached - close all doors', '2026-03-26 15:02:05', 57),
-(27, '2026-03-26 15:02:07', NULL, 'movement', NULL, 'DADO_INVALIDO', 'Movement invalid: blocked simulation only accepts fatigue events (origin=0, destiny=0, status=2)', '2026-03-26 15:02:07', 57),
-(28, '2026-03-26 15:20:12', NULL, 'movement', 6.00, 'ALERTA_SALA_CHEIA', 'Sala 5 atingiu ocupacao maxima: 6', '2026-03-26 15:20:12', 58),
-(29, '2026-03-26 15:20:30', NULL, 'movement', 9.00, 'ALERTA_SALA_CHEIA', 'Sala 5 atingiu ocupacao maxima: 9', '2026-03-26 15:20:30', 58),
-(30, '2026-03-26 15:20:42', NULL, 'sound', NULL, 'DADO_INVALIDO', 'Hour invalid', '2026-03-26 15:20:42', 58),
-(31, '2026-03-26 15:20:46', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:46', 58),
-(32, '2026-03-26 15:20:47', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:47', 58),
-(33, '2026-03-26 15:20:48', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:48', 58),
-(34, '2026-03-26 15:20:49', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:49', 58),
-(35, '2026-03-26 15:20:49', NULL, 'movement', 10.00, 'ALERTA_SALA_CHEIA', 'Sala 5 atingiu ocupacao maxima: 10', '2026-03-26 15:20:49', 58),
-(36, '2026-03-26 15:20:50', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:50', 58),
-(37, '2026-03-26 15:20:51', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:51', 58),
-(38, '2026-03-26 15:20:52', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:52', 58),
-(39, '2026-03-26 15:20:53', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:53', 58),
-(40, '2026-03-26 15:20:54', NULL, 'movement', NULL, 'DADO_INVALIDO', 'Movement invalid: RoomOrigin does not match Marsami current room', '2026-03-26 15:20:54', 58),
-(41, '2026-03-26 15:20:54', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:54', 58),
-(42, '2026-03-26 15:20:55', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:55', 58),
-(43, '2026-03-26 15:20:56', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:56', 58),
-(44, '2026-03-26 15:20:57', NULL, 'TEMPERATURE', 19.24, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.24 | median=16.0800 | mad=0.4900 | robust_z=4.3498', '2026-03-26 15:20:57', 58),
-(45, '2026-03-26 15:20:58', NULL, 'TEMPERATURE', 19.43, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.43 | median=16.1600 | mad=0.5650 | robust_z=3.9037', '2026-03-26 15:20:58', 58),
-(46, '2026-03-26 15:20:59', NULL, 'TEMPERATURE', 19.62, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.62 | median=16.2400 | mad=0.6300 | robust_z=3.6187', '2026-03-26 15:20:59', 58),
-(47, '2026-03-26 15:21:00', NULL, 'TEMPERATURE', 19.82, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.82 | median=16.4100 | mad=0.6400 | robust_z=3.5938', '2026-03-26 15:21:00', 58),
-(48, '2026-03-26 15:21:01', NULL, 'TEMPERATURE', 20.02, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=20.02 | median=16.5700 | mad=0.6500 | robust_z=3.5800', '2026-03-26 15:21:01', 58),
-(49, '2026-03-26 15:21:01', NULL, 'TEMPERATURE', 20.02, 'ALERTA_TEMPERATURA', 'High temperature alert', '2026-03-26 15:21:01', 58),
-(50, '2026-03-26 15:21:06', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'Hour invalid', '2026-03-26 15:21:06', 58),
-(51, '2026-03-26 15:21:06', NULL, 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:21:06', 58),
-(52, '2026-03-26 15:21:06', NULL, 'movement', 7.00, 'ALERTA_SALA_CHEIA', 'Sala 7 atingiu ocupacao maxima: 7', '2026-03-26 15:21:06', 58),
-(53, '2026-03-26 15:21:07', NULL, 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:21:07', 58),
-(54, '2026-03-26 15:21:08', NULL, 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:21:08', 58),
-(55, '2026-03-26 15:21:13', NULL, 'SOUND', 22.08, 'ALERTA_SOM', 'High sound alert', '2026-03-26 15:21:13', 58),
-(56, '2026-03-26 15:21:15', NULL, 'movement', NULL, 'DADO_INVALIDO', 'Movement invalid: RoomOrigin does not match Marsami current room', '2026-03-26 15:21:15', 58),
-(57, '2026-03-26 15:21:18', NULL, 'TEMPERATURE', 23.47, 'ALERTA_TEMPERATURA', 'High temperature alert', '2026-03-26 15:21:18', 58),
-(58, '2026-03-26 15:21:23', NULL, 'movement', 11.00, 'ALERTA_SALA_CHEIA', 'Sala 5 atingiu ocupacao maxima: 11', '2026-03-26 15:21:23', 58),
-(59, '2026-03-26 15:21:24', NULL, 'SOUND', 27.45, 'BLOQUEIO_SOM', 'Maximum sound reached - close all doors', '2026-03-26 15:21:25', 58),
-(60, '2026-03-26 15:22:10', NULL, 'temperature', NULL, 'DADO_INVALIDO', 'A simulacao 58 ja foi terminada', '2026-03-26 15:22:10', 58);
+INSERT INTO `Mensagens` (`ID`, `Hora`, `Sensor`, `Leitura`, `TipoAlerta`, `Msg`, `HoraEscrita`, `IDSimulacao`) VALUES
+(1, '2026-03-26 15:01:05', 'movement', 6.00, 'ALERTA_SALA_CHEIA', 'Sala 7 atingiu ocupacao maxima: 6', '2026-03-26 15:01:05', 57),
+(2, '2026-03-26 15:01:23', 'sound', NULL, 'DADO_INVALIDO', 'Hour invalid', '2026-03-26 15:01:23', 57),
+(3, '2026-03-26 15:01:26', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:26', 57),
+(4, '2026-03-26 15:01:27', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:27', 57),
+(5, '2026-03-26 15:01:28', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:28', 57),
+(6, '2026-03-26 15:01:30', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:30', 57),
+(7, '2026-03-26 15:01:31', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:31', 57),
+(8, '2026-03-26 15:01:32', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:32', 57),
+(9, '2026-03-26 15:01:33', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:33', 57),
+(10, '2026-03-26 15:01:33', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:33', 57),
+(11, '2026-03-26 15:01:34', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:34', 57),
+(12, '2026-03-26 15:01:35', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:35', 57),
+(13, '2026-03-26 15:01:37', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:01:37', 57),
+(14, '2026-03-26 15:01:37', 'TEMPERATURE', 19.24, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.24 | median=16.0800 | mad=0.4900 | robust_z=4.3498', '2026-03-26 15:01:38', 57),
+(15, '2026-03-26 15:01:38', 'TEMPERATURE', 19.43, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.43 | median=16.1600 | mad=0.5650 | robust_z=3.9037', '2026-03-26 15:01:39', 57),
+(16, '2026-03-26 15:01:39', 'TEMPERATURE', 19.62, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.62 | median=16.2400 | mad=0.6300 | robust_z=3.6187', '2026-03-26 15:01:40', 57),
+(17, '2026-03-26 15:01:40', 'TEMPERATURE', 19.82, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.82 | median=16.4100 | mad=0.6400 | robust_z=3.5938', '2026-03-26 15:01:41', 57),
+(18, '2026-03-26 15:01:41', 'TEMPERATURE', 20.02, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=20.02 | median=16.5700 | mad=0.6500 | robust_z=3.5800', '2026-03-26 15:01:42', 57),
+(19, '2026-03-26 15:01:41', 'TEMPERATURE', 20.02, 'ALERTA_TEMPERATURA', 'High temperature alert', '2026-03-26 15:01:42', 57),
+(20, '2026-03-26 15:01:46', 'temperature', NULL, 'DADO_INVALIDO', 'Hour invalid', '2026-03-26 15:01:46', 57),
+(21, '2026-03-26 15:01:46', 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:01:46', 57),
+(22, '2026-03-26 15:01:47', 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:01:47', 57),
+(23, '2026-03-26 15:01:48', 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:01:48', 57),
+(24, '2026-03-26 15:01:53', 'SOUND', 22.08, 'ALERTA_SOM', 'High sound alert', '2026-03-26 15:01:53', 57),
+(25, '2026-03-26 15:01:58', 'TEMPERATURE', 23.47, 'ALERTA_TEMPERATURA', 'High temperature alert', '2026-03-26 15:01:59', 57),
+(26, '2026-03-26 15:02:05', 'SOUND', 27.45, 'BLOQUEIO_SOM', 'Maximum sound reached - close all doors', '2026-03-26 15:02:05', 57),
+(27, '2026-03-26 15:02:07', 'movement', NULL, 'DADO_INVALIDO', 'Movement invalid: blocked simulation only accepts fatigue events (origin=0, destiny=0, status=2)', '2026-03-26 15:02:07', 57),
+(28, '2026-03-26 15:20:12', 'movement', 6.00, 'ALERTA_SALA_CHEIA', 'Sala 5 atingiu ocupacao maxima: 6', '2026-03-26 15:20:12', 58),
+(29, '2026-03-26 15:20:30', 'movement', 9.00, 'ALERTA_SALA_CHEIA', 'Sala 5 atingiu ocupacao maxima: 9', '2026-03-26 15:20:30', 58),
+(30, '2026-03-26 15:20:42', 'sound', NULL, 'DADO_INVALIDO', 'Hour invalid', '2026-03-26 15:20:42', 58),
+(31, '2026-03-26 15:20:46', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:46', 58),
+(32, '2026-03-26 15:20:47', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:47', 58),
+(33, '2026-03-26 15:20:48', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:48', 58),
+(34, '2026-03-26 15:20:49', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:49', 58),
+(35, '2026-03-26 15:20:49', 'movement', 10.00, 'ALERTA_SALA_CHEIA', 'Sala 5 atingiu ocupacao maxima: 10', '2026-03-26 15:20:49', 58),
+(36, '2026-03-26 15:20:50', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:50', 58),
+(37, '2026-03-26 15:20:51', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:51', 58),
+(38, '2026-03-26 15:20:52', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:52', 58),
+(39, '2026-03-26 15:20:53', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:53', 58),
+(40, '2026-03-26 15:20:54', 'movement', NULL, 'DADO_INVALIDO', 'Movement invalid: RoomOrigin does not match Marsami current room', '2026-03-26 15:20:54', 58),
+(41, '2026-03-26 15:20:54', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:54', 58),
+(42, '2026-03-26 15:20:55', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:55', 58),
+(43, '2026-03-26 15:20:56', 'temperature', NULL, 'DADO_INVALIDO', 'Temperature event invalid: value >= 60', '2026-03-26 15:20:56', 58),
+(44, '2026-03-26 15:20:57', 'TEMPERATURE', 19.24, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.24 | median=16.0800 | mad=0.4900 | robust_z=4.3498', '2026-03-26 15:20:57', 58),
+(45, '2026-03-26 15:20:58', 'TEMPERATURE', 19.43, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.43 | median=16.1600 | mad=0.5650 | robust_z=3.9037', '2026-03-26 15:20:58', 58),
+(46, '2026-03-26 15:20:59', 'TEMPERATURE', 19.62, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.62 | median=16.2400 | mad=0.6300 | robust_z=3.6187', '2026-03-26 15:20:59', 58),
+(47, '2026-03-26 15:21:00', 'TEMPERATURE', 19.82, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=19.82 | median=16.4100 | mad=0.6400 | robust_z=3.5938', '2026-03-26 15:21:00', 58),
+(48, '2026-03-26 15:21:01', 'TEMPERATURE', 20.02, 'OUTLIER_TEMPERATURA', 'Temperature outlier detected | value=20.02 | median=16.5700 | mad=0.6500 | robust_z=3.5800', '2026-03-26 15:21:01', 58),
+(49, '2026-03-26 15:21:01', 'TEMPERATURE', 20.02, 'ALERTA_TEMPERATURA', 'High temperature alert', '2026-03-26 15:21:01', 58),
+(50, '2026-03-26 15:21:06', 'temperature', NULL, 'DADO_INVALIDO', 'Hour invalid', '2026-03-26 15:21:06', 58),
+(51, '2026-03-26 15:21:06', 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:21:06', 58),
+(52, '2026-03-26 15:21:06', 'movement', 7.00, 'ALERTA_SALA_CHEIA', 'Sala 7 atingiu ocupacao maxima: 7', '2026-03-26 15:21:06', 58),
+(53, '2026-03-26 15:21:07', 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:21:07', 58),
+(54, '2026-03-26 15:21:08', 'sound', NULL, 'DADO_INVALIDO', 'Sound event invalid: value >= 60', '2026-03-26 15:21:08', 58),
+(55, '2026-03-26 15:21:13', 'SOUND', 22.08, 'ALERTA_SOM', 'High sound alert', '2026-03-26 15:21:13', 58),
+(56, '2026-03-26 15:21:15', 'movement', NULL, 'DADO_INVALIDO', 'Movement invalid: RoomOrigin does not match Marsami current room', '2026-03-26 15:21:15', 58),
+(57, '2026-03-26 15:21:18', 'TEMPERATURE', 23.47, 'ALERTA_TEMPERATURA', 'High temperature alert', '2026-03-26 15:21:18', 58),
+(58, '2026-03-26 15:21:23', 'movement', 11.00, 'ALERTA_SALA_CHEIA', 'Sala 5 atingiu ocupacao maxima: 11', '2026-03-26 15:21:23', 58),
+(59, '2026-03-26 15:21:24', 'SOUND', 27.45, 'BLOQUEIO_SOM', 'Maximum sound reached - close all doors', '2026-03-26 15:21:25', 58),
+(60, '2026-03-26 15:22:10', 'temperature', NULL, 'DADO_INVALIDO', 'A simulacao 58 ja foi terminada', '2026-03-26 15:22:10', 58);
 
 -- --------------------------------------------------------
 
 --
--- Table structure for table `OcupacaoLabirinto`
+-- 表的结构 `OcupacaoLabirinto`
 --
 
 CREATE TABLE `OcupacaoLabirinto` (
   `IDSimulacao` int(11) NOT NULL,
-  `NumeroOdds` int(11) DEFAULT NULL,
-  `NumeroEvens` int(11) DEFAULT NULL,
+  `NumeroOdds` int(11) NOT NULL DEFAULT 0,
+  `NumeroEvens` int(11) NOT NULL DEFAULT 0,
   `Sala` int(11) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
--- Dumping data for table `OcupacaoLabirinto`
+-- 转存表中的数据 `OcupacaoLabirinto`
 --
 
 INSERT INTO `OcupacaoLabirinto` (`IDSimulacao`, `NumeroOdds`, `NumeroEvens`, `Sala`) VALUES
@@ -3733,24 +3698,24 @@ INSERT INTO `OcupacaoLabirinto` (`IDSimulacao`, `NumeroOdds`, `NumeroEvens`, `Sa
 -- --------------------------------------------------------
 
 --
--- Table structure for table `ScoreSala`
+-- 表的结构 `ScoreSala`
 --
 
 CREATE TABLE `ScoreSala` (
   `IDScore` int(11) NOT NULL,
   `IDSimulacao` int(11) DEFAULT NULL,
-  `PlayerID` int(11) DEFAULT NULL,
+  `IDUtilizador` int(11) NOT NULL,
   `Sala` int(11) DEFAULT NULL,
-  `Tentativa` int(11) DEFAULT NULL,
-  `Hora` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  `Resultado` varchar(10) DEFAULT NULL,
+  `NumTentativa` int(11) NOT NULL,
+  `Hora` timestamp NOT NULL DEFAULT current_timestamp(),
+  `Resultado` enum('SUCESSO','FALHA') NOT NULL,
   `Pontos` decimal(4,2) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
 
 --
--- Table structure for table `Simulacao`
+-- 表的结构 `Simulacao`
 --
 
 CREATE TABLE `Simulacao` (
@@ -3763,7 +3728,7 @@ CREATE TABLE `Simulacao` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
--- Dumping data for table `Simulacao`
+-- 转存表中的数据 `Simulacao`
 --
 
 INSERT INTO `Simulacao` (`IDSimulacao`, `IDUtilizadorCriador`, `Descricao`, `DataHorainicio`, `DataHoraFim`, `Estado`) VALUES
@@ -3776,7 +3741,7 @@ INSERT INTO `Simulacao` (`IDSimulacao`, `IDUtilizadorCriador`, `Descricao`, `Dat
 (58, 1, NULL, NULL, '2026-03-26 15:22:10', 'Terminada');
 
 --
--- Triggers `Simulacao`
+-- 触发器 `Simulacao`
 --
 DELIMITER $$
 CREATE TRIGGER `before_start_simulacao` BEFORE UPDATE ON `Simulacao` FOR EACH ROW BEGIN
@@ -3808,18 +3773,18 @@ DELIMITER ;
 -- --------------------------------------------------------
 
 --
--- Table structure for table `Som`
+-- 表的结构 `Som`
 --
 
 CREATE TABLE `Som` (
   `IDSom` int(11) NOT NULL,
-  `Hora` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  `Som` double DEFAULT NULL,
-  `IDSimulacao` int(11) DEFAULT NULL
+  `Hora` timestamp NOT NULL DEFAULT current_timestamp(),
+  `Som` double NOT NULL,
+  `IDSimulacao` int(11) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
--- Dumping data for table `Som`
+-- 转存表中的数据 `Som`
 --
 
 INSERT INTO `Som` (`IDSom`, `Hora`, `Som`, `IDSimulacao`) VALUES
@@ -4154,7 +4119,7 @@ INSERT INTO `Som` (`IDSom`, `Hora`, `Som`, `IDSimulacao`) VALUES
 (329, '2026-03-26 15:21:24', 27.45, 58);
 
 --
--- Triggers `Som`
+-- 触发器 `Som`
 --
 DELIMITER $$
 CREATE TRIGGER `before_insert_som` BEFORE INSERT ON `Som` FOR EACH ROW BEGIN
@@ -4189,18 +4154,18 @@ DELIMITER ;
 -- --------------------------------------------------------
 
 --
--- Table structure for table `Temperatura`
+-- 表的结构 `Temperatura`
 --
 
 CREATE TABLE `Temperatura` (
   `IDTemperatura` int(11) NOT NULL,
-  `Hora` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  `Temperatura` double DEFAULT NULL,
-  `IDSimulacao` int(11) DEFAULT NULL
+  `Hora` timestamp NOT NULL DEFAULT current_timestamp(),
+  `Temperatura` double NOT NULL,
+  `IDSimulacao` int(11) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
--- Dumping data for table `Temperatura`
+-- 转存表中的数据 `Temperatura`
 --
 
 INSERT INTO `Temperatura` (`IDTemperatura`, `Hora`, `Temperatura`, `IDSimulacao`) VALUES
@@ -4595,7 +4560,7 @@ INSERT INTO `Temperatura` (`IDTemperatura`, `Hora`, `Temperatura`, `IDSimulacao`
 (389, '2026-03-26 15:21:24', 24.92, 58);
 
 --
--- Triggers `Temperatura`
+-- 触发器 `Temperatura`
 --
 DELIMITER $$
 CREATE TRIGGER `before_insert_temperatura` BEFORE INSERT ON `Temperatura` FOR EACH ROW BEGIN
@@ -4630,7 +4595,7 @@ DELIMITER ;
 -- --------------------------------------------------------
 
 --
--- Table structure for table `Utilizador`
+-- 表的结构 `Utilizador`
 --
 
 CREATE TABLE `Utilizador` (
@@ -4638,7 +4603,7 @@ CREATE TABLE `Utilizador` (
   `Username` varchar(50) NOT NULL,
   `Nome` varchar(100) DEFAULT NULL,
   `Telemovel` varchar(12) DEFAULT NULL,
-  `Tipo` varchar(6) DEFAULT NULL,
+  `Tipo` varchar(20) DEFAULT NULL,
   `Email` varchar(50) NOT NULL,
   `DataNascimento` date DEFAULT NULL,
   `Equipa` int(11) NOT NULL,
@@ -4646,72 +4611,74 @@ CREATE TABLE `Utilizador` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
--- Dumping data for table `Utilizador`
+-- 转存表中的数据 `Utilizador`
 --
 
 INSERT INTO `Utilizador` (`IDUtilizador`, `Username`, `Nome`, `Telemovel`, `Tipo`, `Email`, `DataNascimento`, `Equipa`, `Password`) VALUES
-(1, 'Jun', 'Jun', NULL, 'Admin', 'jun@mail.com', NULL, 5, '1234'),
-(67, 'Teste', 'Teste', NULL, 'User', 'test@mail.com', NULL, 5, '1234'),
-(71, 'admin1', 'Administrador', NULL, 'Admin', 'admin1@test.com', NULL, 1, 'admin123'),
-(72, 'user1', 'coelho', NULL, 'User', 'user1novo@test.com', NULL, 2, 'novapass123'),
-(73, 'user2', 'Bomdia', NULL, 'User', 'user2novo@test.com', NULL, 1, 'novapass123'),
-(74, 'uuuuser', 'Novo', NULL, 'User', 'userNOVO@test.com', NULL, 1, 'user123'),
-(75, 'script1', 'umaScript', NULL, NULL, 'script1@test.com', NULL, 5, 'script123');
+(1, 'Jun', 'Jun', NULL, 'AdminApp', 'jun@mail.com', NULL, 5, '1234'),
+(67, 'Teste', 'Teste', NULL, 'Investigador', 'test@mail.com', NULL, 5, '1234'),
+(71, 'admin1', 'Administrador', NULL, 'AdminApp', 'admin1@test.com', NULL, 1, 'admin123'),
+(72, 'user1', 'coelho', NULL, 'Investigador', 'user1novo@test.com', NULL, 2, 'novapass123'),
+(73, 'user2', 'Bomdia', NULL, 'Investigador', 'user2novo@test.com', NULL, 1, 'novapass123'),
+(74, 'uuuuser', 'Novo', NULL, 'Investigador', 'userNOVO@test.com', NULL, 1, 'user123'),
+(75, 'script1', 'umaScript', NULL, 'Script', 'script1@test.com', NULL, 5, 'script123');
 
 --
--- Indexes for dumped tables
+-- 转储表的索引
 --
 
 --
--- Indexes for table `Corridor`
+-- 表的索引 `Corridor`
 --
 ALTER TABLE `Corridor`
   ADD PRIMARY KEY (`ID`);
 
 --
--- Indexes for table `EventosProcessados`
+-- 表的索引 `EventosProcessados`
 --
 ALTER TABLE `EventosProcessados`
   ADD PRIMARY KEY (`EventID`),
   ADD KEY `idx_eventosprocessados_sim` (`IDSimulacao`);
 
 --
--- Indexes for table `Marsami`
+-- 表的索引 `Marsami`
 --
 ALTER TABLE `Marsami`
   ADD PRIMARY KEY (`IDSimulacao`,`IDMarsami`),
+  ADD UNIQUE KEY `uq_marsami_simulacao` (`IDMarsami`,`IDSimulacao`),
   ADD KEY `idx_marsami_id` (`IDMarsami`);
 
 --
--- Indexes for table `MedicoesPassagens`
+-- 表的索引 `MedicoesPassagens`
 --
 ALTER TABLE `MedicoesPassagens`
   ADD PRIMARY KEY (`IDMedicao`),
   ADD KEY `idx_medicoespassagens_sim_marsami` (`IDSimulacao`,`Marsami`);
 
 --
--- Indexes for table `Mensagens`
+-- 表的索引 `Mensagens`
 --
 ALTER TABLE `Mensagens`
   ADD PRIMARY KEY (`ID`),
   ADD KEY `IDSimulacao` (`IDSimulacao`);
 
 --
--- Indexes for table `OcupacaoLabirinto`
+-- 表的索引 `OcupacaoLabirinto`
 --
 ALTER TABLE `OcupacaoLabirinto`
-  ADD PRIMARY KEY (`IDSimulacao`,`Sala`),
-  ADD UNIQUE KEY `uq_ocupacao_sim_sala` (`IDSimulacao`,`Sala`);
+  ADD PRIMARY KEY (`IDSimulacao`,`Sala`);
 
 --
--- Indexes for table `ScoreSala`
+-- 表的索引 `ScoreSala`
 --
 ALTER TABLE `ScoreSala`
   ADD PRIMARY KEY (`IDScore`),
-  ADD KEY `idx_scoresala_sim_sala` (`IDSimulacao`,`Sala`);
+  ADD UNIQUE KEY `uq_scoresala_tentativa` (`IDSimulacao`,`IDUtilizador`,`Sala`,`NumTentativa`),
+  ADD KEY `idx_scoresala_sim_sala` (`IDSimulacao`,`Sala`),
+  ADD KEY `fk_scoresala_utilizador_01` (`IDUtilizador`);
 
 --
--- Indexes for table `Simulacao`
+-- 表的索引 `Simulacao`
 --
 ALTER TABLE `Simulacao`
   ADD PRIMARY KEY (`IDSimulacao`),
@@ -4719,127 +4686,129 @@ ALTER TABLE `Simulacao`
   ADD KEY `idx_simulacao_estado` (`Estado`);
 
 --
--- Indexes for table `Som`
+-- 表的索引 `Som`
 --
 ALTER TABLE `Som`
   ADD PRIMARY KEY (`IDSom`),
   ADD KEY `IDSimulacao` (`IDSimulacao`);
 
 --
--- Indexes for table `Temperatura`
+-- 表的索引 `Temperatura`
 --
 ALTER TABLE `Temperatura`
   ADD PRIMARY KEY (`IDTemperatura`),
   ADD KEY `IDSimulacao` (`IDSimulacao`);
 
 --
--- Indexes for table `Utilizador`
+-- 表的索引 `Utilizador`
 --
 ALTER TABLE `Utilizador`
   ADD PRIMARY KEY (`IDUtilizador`),
   ADD UNIQUE KEY `uq_utilizador_username` (`Username`);
 
 --
--- AUTO_INCREMENT for dumped tables
+-- 在导出的表使用AUTO_INCREMENT
 --
 
 --
--- AUTO_INCREMENT for table `MedicoesPassagens`
+-- 使用表AUTO_INCREMENT `MedicoesPassagens`
 --
 ALTER TABLE `MedicoesPassagens`
   MODIFY `IDMedicao` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=510;
 
 --
--- AUTO_INCREMENT for table `Mensagens`
+-- 使用表AUTO_INCREMENT `Mensagens`
 --
 ALTER TABLE `Mensagens`
   MODIFY `ID` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=61;
 
 --
--- AUTO_INCREMENT for table `ScoreSala`
+-- 使用表AUTO_INCREMENT `ScoreSala`
 --
 ALTER TABLE `ScoreSala`
   MODIFY `IDScore` int(11) NOT NULL AUTO_INCREMENT;
 
 --
--- AUTO_INCREMENT for table `Simulacao`
+-- 使用表AUTO_INCREMENT `Simulacao`
 --
 ALTER TABLE `Simulacao`
   MODIFY `IDSimulacao` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=59;
 
 --
--- AUTO_INCREMENT for table `Som`
+-- 使用表AUTO_INCREMENT `Som`
 --
 ALTER TABLE `Som`
   MODIFY `IDSom` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=330;
 
 --
--- AUTO_INCREMENT for table `Temperatura`
+-- 使用表AUTO_INCREMENT `Temperatura`
 --
 ALTER TABLE `Temperatura`
   MODIFY `IDTemperatura` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=390;
 
 --
--- AUTO_INCREMENT for table `Utilizador`
+-- 使用表AUTO_INCREMENT `Utilizador`
 --
 ALTER TABLE `Utilizador`
   MODIFY `IDUtilizador` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=76;
 
 --
--- Constraints for dumped tables
+-- 限制导出的表
 --
 
 --
--- Constraints for table `EventosProcessados`
+-- 限制表 `EventosProcessados`
 --
 ALTER TABLE `EventosProcessados`
   ADD CONSTRAINT `fk_eventosprocessados_sim` FOREIGN KEY (`IDSimulacao`) REFERENCES `Simulacao` (`IDSimulacao`);
 
 --
--- Constraints for table `Marsami`
+-- 限制表 `Marsami`
 --
 ALTER TABLE `Marsami`
   ADD CONSTRAINT `fk_marsami_simulacao` FOREIGN KEY (`IDSimulacao`) REFERENCES `Simulacao` (`IDSimulacao`);
 
 --
--- Constraints for table `MedicoesPassagens`
+-- 限制表 `MedicoesPassagens`
 --
 ALTER TABLE `MedicoesPassagens`
   ADD CONSTRAINT `fk_medicoespassagens_marsami` FOREIGN KEY (`IDSimulacao`,`Marsami`) REFERENCES `Marsami` (`IDSimulacao`, `IDMarsami`),
-  ADD CONSTRAINT `medicoespassagens_ibfk_1` FOREIGN KEY (`IDSimulacao`) REFERENCES `Simulacao` (`IDSimulacao`);
+  ADD CONSTRAINT `fk_medicoespassagens_simulacao` FOREIGN KEY (`IDSimulacao`) REFERENCES `Simulacao` (`IDSimulacao`);
 
 --
--- Constraints for table `Mensagens`
+-- 限制表 `Mensagens`
 --
 ALTER TABLE `Mensagens`
   ADD CONSTRAINT `mensagens_ibfk_1` FOREIGN KEY (`IDSimulacao`) REFERENCES `Simulacao` (`IDSimulacao`);
 
 --
--- Constraints for table `OcupacaoLabirinto`
+-- 限制表 `OcupacaoLabirinto`
 --
 ALTER TABLE `OcupacaoLabirinto`
   ADD CONSTRAINT `fk_ocupacao_simulacao` FOREIGN KEY (`IDSimulacao`) REFERENCES `Simulacao` (`IDSimulacao`);
 
 --
--- Constraints for table `ScoreSala`
+-- 限制表 `ScoreSala`
 --
 ALTER TABLE `ScoreSala`
-  ADD CONSTRAINT `fk_scoresala_simulacao` FOREIGN KEY (`IDSimulacao`) REFERENCES `Simulacao` (`IDSimulacao`);
+  ADD CONSTRAINT `fk_scoresala_ocupacao_01` FOREIGN KEY (`IDSimulacao`,`Sala`) REFERENCES `OcupacaoLabirinto` (`IDSimulacao`, `Sala`),
+  ADD CONSTRAINT `fk_scoresala_simulacao` FOREIGN KEY (`IDSimulacao`) REFERENCES `Simulacao` (`IDSimulacao`),
+  ADD CONSTRAINT `fk_scoresala_utilizador` FOREIGN KEY (`IDUtilizador`) REFERENCES `Utilizador` (`IDUtilizador`);
 
 --
--- Constraints for table `Simulacao`
+-- 限制表 `Simulacao`
 --
 ALTER TABLE `Simulacao`
   ADD CONSTRAINT `fk_simulacao_utilizador` FOREIGN KEY (`IDUtilizadorCriador`) REFERENCES `Utilizador` (`IDUtilizador`);
 
 --
--- Constraints for table `Som`
+-- 限制表 `Som`
 --
 ALTER TABLE `Som`
   ADD CONSTRAINT `som_ibfk_1` FOREIGN KEY (`IDSimulacao`) REFERENCES `Simulacao` (`IDSimulacao`);
 
 --
--- Constraints for table `Temperatura`
+-- 限制表 `Temperatura`
 --
 ALTER TABLE `Temperatura`
   ADD CONSTRAINT `temperatura_ibfk_1` FOREIGN KEY (`IDSimulacao`) REFERENCES `Simulacao` (`IDSimulacao`);

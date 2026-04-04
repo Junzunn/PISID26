@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from uuid import uuid4
 
 import paho.mqtt.client as mqtt
 from pymongo import ASCENDING, MongoClient
@@ -16,7 +14,6 @@ from pymongo.errors import DuplicateKeyError, OperationFailure
 GROUP_ID = 5
 BROKER = "broker.emqx.io"
 PORT = 1883
-VALIDATION_TIMEOUT = 20
 LOOP_INTERVAL = 0.5
 RETRY_INTERVAL = 2
 BATCH_SIZE = 50
@@ -31,9 +28,6 @@ MQTT_CLIENT = None
 class RuntimeState:
     simulation_id: int | None = None
     current_seq: int = 0
-    validation_ok: bool = False
-    validation_error: str | None = None
-    validation_request_id: str | None = None
     raw_subscribed: bool = False
     simulation_finished: bool = False
     ingest_buffer: deque[dict] = field(default_factory=deque)
@@ -113,7 +107,7 @@ def enqueue_raw_event(topic: str, payload: dict) -> None:
 
 
 def flush_buffer_once() -> None:
-    if not (STATE.validation_ok and is_primary()):
+    if not is_primary():
         return
     while STATE.ingest_buffer:
         event = STATE.ingest_buffer[0]
@@ -143,7 +137,7 @@ def publish_doc(doc: dict) -> None:
 
 
 def publish_pending_once() -> None:
-    if not (STATE.validation_ok and is_primary()):
+    if not is_primary():
         return
     cutoff = datetime.now() - timedelta(seconds=RETRY_INTERVAL)
     cursor = (
@@ -162,36 +156,6 @@ def publish_pending_once() -> None:
     )
     for doc in cursor:
         publish_doc(doc)
-
-
-def wait_validation() -> None:
-    STATE.validation_request_id = str(uuid4())
-    deadline = time.time() + VALIDATION_TIMEOUT
-    while not STATE.validation_ok and STATE.validation_error is None:
-        if time.time() >= deadline:
-            STATE.validation_error = "pc2_no_response"
-            return
-        publish_bridge(
-            {
-                "kind": "simcheck_req",
-                "src": "pc1",
-                "request_id": STATE.validation_request_id,
-                "simulation_id": STATE.simulation_id,
-            }
-        )
-        time.sleep(RETRY_INTERVAL)
-
-
-def handle_simcheck_response(data: dict) -> None:
-    if data.get("request_id") != STATE.validation_request_id:
-        return
-    status = data.get("status")
-    if status == "ok":
-        STATE.validation_ok = True
-        set_raw_subscription(True)
-        print(f"PC1: simulation {STATE.simulation_id} validated")
-    else:
-        STATE.validation_error = status
 
 
 def handle_receipt(data: dict) -> None:
@@ -228,13 +192,11 @@ def on_message(client, userdata, msg) -> None:
             if data.get("src") == "pc1":
                 return
             kind = data.get("kind")
-            if kind == "simcheck_resp":
-                handle_simcheck_response(data)
-            elif kind == "receipt":
+            if kind == "receipt":
                 handle_receipt(data)
             elif kind == "game_end":
                 handle_game_end(data)
-        elif STATE.validation_ok and msg.topic in RAW_TOPICS:
+        elif msg.topic in RAW_TOPICS and not STATE.simulation_finished:
             enqueue_raw_event(msg.topic, data)
     except Exception as exc:
         print("Erro PC1:", exc)
@@ -242,7 +204,7 @@ def on_message(client, userdata, msg) -> None:
 
 def on_connect(client, userdata, flags, reason_code, properties) -> None:
     client.subscribe(BRIDGE_TOPIC, qos=1)
-    if STATE.validation_ok and not STATE.simulation_finished:
+    if not STATE.simulation_finished:
         set_raw_subscription(True)
 
 
@@ -278,13 +240,6 @@ def main() -> None:
     MQTT_CLIENT.on_message = on_message
     MQTT_CLIENT.connect(BROKER, PORT)
     MQTT_CLIENT.loop_start()
-
-    wait_validation()
-    if not STATE.validation_ok:
-        MQTT_CLIENT.loop_stop()
-        MQTT_CLIENT.disconnect()
-        print(f"ERRO: {STATE.validation_error or 'validation_failed'}")
-        sys.exit(1)
 
     try:
         while not can_exit():
