@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- 主机： localhost
--- 生成日期： 2026-04-05 00:17:54
+-- 生成日期： 2026-04-10 17:52:43
 -- 服务器版本： 10.4.28-MariaDB
 -- PHP 版本： 8.2.4
 
@@ -346,7 +346,6 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_
     DECLARE v_exists INT DEFAULT 0;
     DECLARE v_tipo VARCHAR(4);
     DECLARE v_total_marsamis INT DEFAULT 0;
-    DECLARE v_last_room_alert_time DATETIME DEFAULT NULL;
 
     SELECT COUNT(*)
       INTO v_exists
@@ -427,24 +426,14 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_
            AND Sala = p_destiny;
 
         IF v_total_marsamis >= 6 THEN
-            SELECT MAX(Hora)
-              INTO v_last_room_alert_time
-              FROM Mensagens
-             WHERE IDSimulacao = p_sim_id
-               AND TipoAlerta = 'ALERTA_SALA_CHEIA'
-               AND COALESCE(Msg, '') LIKE CONCAT('%Sala ', p_destiny, ' %');
-
-            IF v_last_room_alert_time IS NULL
-               OR TIMESTAMPDIFF(SECOND, v_last_room_alert_time, p_hora) >= 10 THEN
-                CALL sp_log_message(
-                    p_sim_id,
-                    'movement',
-                    'ALERTA_SALA_CHEIA',
-                    CONCAT('Sala ', p_destiny, ' atingiu ocupacao maxima: ', v_total_marsamis),
-                    p_hora,
-                    v_total_marsamis
-                );
-            END IF;
+            CALL sp_log_message(
+                p_sim_id,
+                'movement',
+                'ALERTA_SALA_CHEIA',
+                CONCAT('Sala ', p_destiny, ' atingiu ocupacao maxima: ', v_total_marsamis),
+                p_hora,
+                v_total_marsamis
+            );
         END IF;
 
     ELSE
@@ -535,24 +524,14 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_movimento` (IN `p_sim_
                AND Sala = p_destiny;
 
             IF v_total_marsamis >= 6 THEN
-                SELECT MAX(Hora)
-                  INTO v_last_room_alert_time
-                  FROM Mensagens
-                 WHERE IDSimulacao = p_sim_id
-                   AND TipoAlerta = 'ALERTA_SALA_CHEIA'
-                   AND COALESCE(Msg, '') LIKE CONCAT('%Sala ', p_destiny, ' %');
-
-                IF v_last_room_alert_time IS NULL
-                   OR TIMESTAMPDIFF(SECOND, v_last_room_alert_time, p_hora) >= 10 THEN
-                    CALL sp_log_message(
-                        p_sim_id,
-                        'movement',
-                        'ALERTA_SALA_CHEIA',
-                        CONCAT('Sala ', p_destiny, ' atingiu ocupacao maxima: ', v_total_marsamis),
-                        p_hora,
-                        v_total_marsamis
-                    );
-                END IF;
+                CALL sp_log_message(
+                    p_sim_id,
+                    'movement',
+                    'ALERTA_SALA_CHEIA',
+                    CONCAT('Sala ', p_destiny, ' atingiu ocupacao maxima: ', v_total_marsamis),
+                    p_hora,
+                    v_total_marsamis
+                );
             END IF;
 
         END IF;
@@ -581,31 +560,34 @@ END$$
 
 CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_ruido` (IN `p_sim_id` INT, IN `p_hora` DATETIME, IN `p_val` DECIMAL(10,2))   proc: BEGIN
     DECLARE v_is_outlier BOOLEAN DEFAULT FALSE;
-    DECLARE v_last_alert_time DATETIME DEFAULT NULL;
-    DECLARE v_estado VARCHAR(20) DEFAULT NULL;
 
     DECLARE v_window_size INT DEFAULT 10;
-    DECLARE v_min_sample INT DEFAULT 5;
-    DECLARE v_threshold DECIMAL(10,4) DEFAULT 3.0;
+    DECLARE v_min_sample INT DEFAULT 6;
+    DECLARE v_threshold DOUBLE DEFAULT 3.0;
+    DECLARE v_sigma_floor DOUBLE DEFAULT 0.10;
 
     DECLARE v_total_count INT DEFAULT 0;
     DECLARE v_sample_size INT DEFAULT 0;
+
+    DECLARE v_t0 DATETIME DEFAULT NULL;
+    DECLARE v_pred DOUBLE DEFAULT NULL;
+    DECLARE v_curr_t DOUBLE DEFAULT NULL;
+    DECLARE v_curr_resid DOUBLE DEFAULT NULL;
+
+    DECLARE v_mean_t DOUBLE DEFAULT NULL;
+    DECLARE v_mean_x DOUBLE DEFAULT NULL;
+    DECLARE v_num DOUBLE DEFAULT NULL;
+    DECLARE v_den DOUBLE DEFAULT NULL;
+    DECLARE v_slope DOUBLE DEFAULT 0.0;
+    DECLARE v_intercept DOUBLE DEFAULT 0.0;
+
+    DECLARE v_median_resid DOUBLE DEFAULT NULL;
+    DECLARE v_mad_resid DOUBLE DEFAULT NULL;
+    DECLARE v_sigma DOUBLE DEFAULT NULL;
+    DECLARE v_score DOUBLE DEFAULT NULL;
+
     DECLARE v_offset_idx INT DEFAULT 0;
     DECLARE v_take_count INT DEFAULT 1;
-
-    DECLARE v_median DECIMAL(12,4) DEFAULT NULL;
-    DECLARE v_mad DECIMAL(12,4) DEFAULT NULL;
-    DECLARE v_robust_z DECIMAL(12,4) DEFAULT NULL;
-
-    SELECT Estado
-      INTO v_estado
-      FROM Simulacao
-     WHERE IDSimulacao = p_sim_id
-     LIMIT 1;
-
-    IF v_estado <> 'ACorrer' THEN
-        LEAVE proc;
-    END IF;
 
     SELECT COUNT(*)
       INTO v_total_count
@@ -615,49 +597,98 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_ruido` (IN `p_sim_id` 
     SET v_sample_size = LEAST(v_total_count, v_window_size);
 
     IF v_sample_size >= v_min_sample THEN
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_hist_som;
+        CREATE TEMPORARY TABLE tmp_hist_som AS
+        SELECT
+            s.Hora,
+            s.Som AS val,
+            ROW_NUMBER() OVER (ORDER BY s.Hora ASC) AS rn
+        FROM (
+            SELECT Hora, Som
+              FROM Som
+             WHERE IDSimulacao = p_sim_id
+             ORDER BY Hora DESC
+             LIMIT v_window_size
+        ) s
+        ORDER BY s.Hora ASC;
+
+        SELECT MIN(Hora)
+          INTO v_t0
+          FROM tmp_hist_som;
+
+        ALTER TABLE tmp_hist_som ADD COLUMN t_sec DOUBLE NULL;
+
+        UPDATE tmp_hist_som
+           SET t_sec = TIMESTAMPDIFF(MICROSECOND, v_t0, Hora) / 1000000.0;
+
+        SELECT AVG(t_sec), AVG(val)
+          INTO v_mean_t, v_mean_x
+          FROM tmp_hist_som;
+
+        SELECT
+            SUM((t_sec - v_mean_t) * (val - v_mean_x)),
+            SUM((t_sec - v_mean_t) * (t_sec - v_mean_t))
+          INTO v_num, v_den
+          FROM tmp_hist_som;
+
+        IF v_den IS NOT NULL AND v_den > 0 THEN
+            SET v_slope = v_num / v_den;
+        ELSE
+            SET v_slope = 0.0;
+        END IF;
+
+        SET v_intercept = v_mean_x - (v_slope * v_mean_t);
+
+        SET v_curr_t = TIMESTAMPDIFF(MICROSECOND, v_t0, p_hora) / 1000000.0;
+        SET v_pred = v_intercept + (v_slope * v_curr_t);
+        SET v_curr_resid = p_val - v_pred;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_resid_som;
+        CREATE TEMPORARY TABLE tmp_resid_som AS
+        SELECT
+            val - (v_intercept + v_slope * t_sec) AS resid
+        FROM tmp_hist_som;
+
         SET v_offset_idx = FLOOR((v_sample_size - 1) / 2);
         SET v_take_count = 2 - MOD(v_sample_size, 2);
 
-        SELECT AVG(t.val)
-          INTO v_median
+        SELECT AVG(t.resid)
+          INTO v_median_resid
           FROM (
-                SELECT r.val
-                  FROM (
-                        SELECT Som AS val
-                          FROM Som
-                         WHERE IDSimulacao = p_sim_id
-                         ORDER BY Hora DESC
-                         LIMIT v_window_size
-                       ) r
-                 ORDER BY r.val
+                SELECT resid
+                  FROM tmp_resid_som
+                 ORDER BY resid
                  LIMIT v_take_count OFFSET v_offset_idx
                ) t;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_absdev_som;
+        CREATE TEMPORARY TABLE tmp_absdev_som AS
+        SELECT ABS(resid - v_median_resid) AS abs_dev
+          FROM tmp_resid_som;
 
         SELECT AVG(t.abs_dev)
-          INTO v_mad
+          INTO v_mad_resid
           FROM (
-                SELECT d.abs_dev
-                  FROM (
-                        SELECT ABS(r2.val - v_median) AS abs_dev
-                          FROM (
-                                SELECT Som AS val
-                                  FROM Som
-                                 WHERE IDSimulacao = p_sim_id
-                                 ORDER BY Hora DESC
-                                 LIMIT v_window_size
-                               ) r2
-                       ) d
-                 ORDER BY d.abs_dev
+                SELECT abs_dev
+                  FROM tmp_absdev_som
+                 ORDER BY abs_dev
                  LIMIT v_take_count OFFSET v_offset_idx
                ) t;
 
-        IF v_mad IS NOT NULL AND v_mad > 0 THEN
-            SET v_robust_z = 0.6745 * ABS(p_val - v_median) / v_mad;
+        SET v_sigma = GREATEST(1.4826 * IFNULL(v_mad_resid, 0), v_sigma_floor);
 
-            IF v_robust_z > v_threshold THEN
+        IF v_sigma > 0 THEN
+            SET v_score = ABS(v_curr_resid - IFNULL(v_median_resid, 0)) / v_sigma;
+
+            IF v_score > v_threshold THEN
                 SET v_is_outlier = TRUE;
             END IF;
         END IF;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_absdev_som;
+        DROP TEMPORARY TABLE IF EXISTS tmp_resid_som;
+        DROP TEMPORARY TABLE IF EXISTS tmp_hist_som;
     END IF;
 
     INSERT INTO Som (Hora, Som, IDSimulacao)
@@ -670,37 +701,29 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_ruido` (IN `p_sim_id` 
             'OUTLIER_SOM',
             CONCAT(
                 'Sound outlier detected | value=', p_val,
-                ' | median=', COALESCE(v_median, -1),
-                ' | mad=', COALESCE(v_mad, -1),
-                ' | robust_z=', COALESCE(v_robust_z, -1)
+                ' | predicted=', ROUND(IFNULL(v_pred, -1), 4),
+                ' | residual=', ROUND(IFNULL(v_curr_resid, -1), 4),
+                ' | median_residual=', ROUND(IFNULL(v_median_resid, -1), 4),
+                ' | mad_residual=', ROUND(IFNULL(v_mad_resid, -1), 4),
+                ' | sigma=', ROUND(IFNULL(v_sigma, -1), 4),
+                ' | score=', ROUND(IFNULL(v_score, -1), 4)
             ),
             p_hora,
             p_val
         );
     END IF;
 
-    /* aproximacao ao maximo: >=22 e <27 */
     IF p_val >= 22 AND p_val < 27 THEN
-        SELECT MAX(HoraEscrita)
-          INTO v_last_alert_time
-          FROM Mensagens
-         WHERE IDSimulacao = p_sim_id
-           AND TipoAlerta = 'ALERTA_SOM';
-
-        IF v_last_alert_time IS NULL
-           OR TIMESTAMPDIFF(SECOND, v_last_alert_time, NOW()) >= 10 THEN
-            CALL sp_log_message(
-                p_sim_id,
-                'SOUND',
-                'ALERTA_SOM',
-                'High sound alert',
-                p_hora,
-                p_val
-            );
-        END IF;
+        CALL sp_log_message(
+            p_sim_id,
+            'SOUND',
+            'ALERTA_SOM',
+            'High sound alert',
+            p_hora,
+            p_val
+        );
     END IF;
 
-    /* maximo atingido: >=27 e <60 */
     IF p_val >= 27 AND p_val < 60 THEN
         CALL simulacao_bloquear(
             p_sim_id,
@@ -715,31 +738,34 @@ END$$
 
 CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_temperatura` (IN `p_sim_id` INT, IN `p_hora` DATETIME, IN `p_val` DECIMAL(10,2))   proc: BEGIN
     DECLARE v_is_outlier BOOLEAN DEFAULT FALSE;
-    DECLARE v_last_alert_time DATETIME DEFAULT NULL;
-    DECLARE v_estado VARCHAR(20) DEFAULT NULL;
 
-    DECLARE v_window_size INT DEFAULT 15;
-    DECLARE v_min_sample INT DEFAULT 7;
-    DECLARE v_threshold DECIMAL(10,4) DEFAULT 3.5;
+    DECLARE v_window_size INT DEFAULT 12;
+    DECLARE v_min_sample INT DEFAULT 8;
+    DECLARE v_threshold DOUBLE DEFAULT 3.0;
+    DECLARE v_sigma_floor DOUBLE DEFAULT 0.08;
 
     DECLARE v_total_count INT DEFAULT 0;
     DECLARE v_sample_size INT DEFAULT 0;
+
+    DECLARE v_t0 DATETIME DEFAULT NULL;
+    DECLARE v_pred DOUBLE DEFAULT NULL;
+    DECLARE v_curr_t DOUBLE DEFAULT NULL;
+    DECLARE v_curr_resid DOUBLE DEFAULT NULL;
+
+    DECLARE v_mean_t DOUBLE DEFAULT NULL;
+    DECLARE v_mean_x DOUBLE DEFAULT NULL;
+    DECLARE v_num DOUBLE DEFAULT NULL;
+    DECLARE v_den DOUBLE DEFAULT NULL;
+    DECLARE v_slope DOUBLE DEFAULT 0.0;
+    DECLARE v_intercept DOUBLE DEFAULT 0.0;
+
+    DECLARE v_median_resid DOUBLE DEFAULT NULL;
+    DECLARE v_mad_resid DOUBLE DEFAULT NULL;
+    DECLARE v_sigma DOUBLE DEFAULT NULL;
+    DECLARE v_score DOUBLE DEFAULT NULL;
+
     DECLARE v_offset_idx INT DEFAULT 0;
     DECLARE v_take_count INT DEFAULT 1;
-
-    DECLARE v_median DECIMAL(12,4) DEFAULT NULL;
-    DECLARE v_mad DECIMAL(12,4) DEFAULT NULL;
-    DECLARE v_robust_z DECIMAL(12,4) DEFAULT NULL;
-
-    SELECT Estado
-      INTO v_estado
-      FROM Simulacao
-     WHERE IDSimulacao = p_sim_id
-     LIMIT 1;
-
-    IF v_estado <> 'ACorrer' THEN
-        LEAVE proc;
-    END IF;
 
     SELECT COUNT(*)
       INTO v_total_count
@@ -749,49 +775,98 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_temperatura` (IN `p_si
     SET v_sample_size = LEAST(v_total_count, v_window_size);
 
     IF v_sample_size >= v_min_sample THEN
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_hist_temp;
+        CREATE TEMPORARY TABLE tmp_hist_temp AS
+        SELECT
+            s.Hora,
+            s.Temperatura AS val,
+            ROW_NUMBER() OVER (ORDER BY s.Hora ASC) AS rn
+        FROM (
+            SELECT Hora, Temperatura
+              FROM Temperatura
+             WHERE IDSimulacao = p_sim_id
+             ORDER BY Hora DESC
+             LIMIT v_window_size
+        ) s
+        ORDER BY s.Hora ASC;
+
+        SELECT MIN(Hora)
+          INTO v_t0
+          FROM tmp_hist_temp;
+
+        ALTER TABLE tmp_hist_temp ADD COLUMN t_sec DOUBLE NULL;
+
+        UPDATE tmp_hist_temp
+           SET t_sec = TIMESTAMPDIFF(MICROSECOND, v_t0, Hora) / 1000000.0;
+
+        SELECT AVG(t_sec), AVG(val)
+          INTO v_mean_t, v_mean_x
+          FROM tmp_hist_temp;
+
+        SELECT
+            SUM((t_sec - v_mean_t) * (val - v_mean_x)),
+            SUM((t_sec - v_mean_t) * (t_sec - v_mean_t))
+          INTO v_num, v_den
+          FROM tmp_hist_temp;
+
+        IF v_den IS NOT NULL AND v_den > 0 THEN
+            SET v_slope = v_num / v_den;
+        ELSE
+            SET v_slope = 0.0;
+        END IF;
+
+        SET v_intercept = v_mean_x - (v_slope * v_mean_t);
+
+        SET v_curr_t = TIMESTAMPDIFF(MICROSECOND, v_t0, p_hora) / 1000000.0;
+        SET v_pred = v_intercept + (v_slope * v_curr_t);
+        SET v_curr_resid = p_val - v_pred;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_resid_temp;
+        CREATE TEMPORARY TABLE tmp_resid_temp AS
+        SELECT
+            val - (v_intercept + v_slope * t_sec) AS resid
+        FROM tmp_hist_temp;
+
         SET v_offset_idx = FLOOR((v_sample_size - 1) / 2);
         SET v_take_count = 2 - MOD(v_sample_size, 2);
 
-        SELECT AVG(t.val)
-          INTO v_median
+        SELECT AVG(t.resid)
+          INTO v_median_resid
           FROM (
-                SELECT r.val
-                  FROM (
-                        SELECT Temperatura AS val
-                          FROM Temperatura
-                         WHERE IDSimulacao = p_sim_id
-                         ORDER BY Hora DESC
-                         LIMIT v_window_size
-                       ) r
-                 ORDER BY r.val
+                SELECT resid
+                  FROM tmp_resid_temp
+                 ORDER BY resid
                  LIMIT v_take_count OFFSET v_offset_idx
                ) t;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_absdev_temp;
+        CREATE TEMPORARY TABLE tmp_absdev_temp AS
+        SELECT ABS(resid - v_median_resid) AS abs_dev
+          FROM tmp_resid_temp;
 
         SELECT AVG(t.abs_dev)
-          INTO v_mad
+          INTO v_mad_resid
           FROM (
-                SELECT d.abs_dev
-                  FROM (
-                        SELECT ABS(r2.val - v_median) AS abs_dev
-                          FROM (
-                                SELECT Temperatura AS val
-                                  FROM Temperatura
-                                 WHERE IDSimulacao = p_sim_id
-                                 ORDER BY Hora DESC
-                                 LIMIT v_window_size
-                               ) r2
-                       ) d
-                 ORDER BY d.abs_dev
+                SELECT abs_dev
+                  FROM tmp_absdev_temp
+                 ORDER BY abs_dev
                  LIMIT v_take_count OFFSET v_offset_idx
                ) t;
 
-        IF v_mad IS NOT NULL AND v_mad > 0 THEN
-            SET v_robust_z = 0.6745 * ABS(p_val - v_median) / v_mad;
+        SET v_sigma = GREATEST(1.4826 * IFNULL(v_mad_resid, 0), v_sigma_floor);
 
-            IF v_robust_z > v_threshold THEN
+        IF v_sigma > 0 THEN
+            SET v_score = ABS(v_curr_resid - IFNULL(v_median_resid, 0)) / v_sigma;
+
+            IF v_score > v_threshold THEN
                 SET v_is_outlier = TRUE;
             END IF;
         END IF;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_absdev_temp;
+        DROP TEMPORARY TABLE IF EXISTS tmp_resid_temp;
+        DROP TEMPORARY TABLE IF EXISTS tmp_hist_temp;
     END IF;
 
     INSERT INTO Temperatura (Hora, Temperatura, IDSimulacao)
@@ -804,37 +879,29 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_processar_temperatura` (IN `p_si
             'OUTLIER_TEMPERATURA',
             CONCAT(
                 'Temperature outlier detected | value=', p_val,
-                ' | median=', COALESCE(v_median, -1),
-                ' | mad=', COALESCE(v_mad, -1),
-                ' | robust_z=', COALESCE(v_robust_z, -1)
+                ' | predicted=', ROUND(IFNULL(v_pred, -1), 4),
+                ' | residual=', ROUND(IFNULL(v_curr_resid, -1), 4),
+                ' | median_residual=', ROUND(IFNULL(v_median_resid, -1), 4),
+                ' | mad_residual=', ROUND(IFNULL(v_mad_resid, -1), 4),
+                ' | sigma=', ROUND(IFNULL(v_sigma, -1), 4),
+                ' | score=', ROUND(IFNULL(v_score, -1), 4)
             ),
             p_hora,
             p_val
         );
     END IF;
 
-    /* aproximacao ao maximo: >=20 e <25 */
     IF p_val >= 20 AND p_val < 25 THEN
-        SELECT MAX(HoraEscrita)
-          INTO v_last_alert_time
-          FROM Mensagens
-         WHERE IDSimulacao = p_sim_id
-           AND TipoAlerta = 'ALERTA_TEMPERATURA';
-
-        IF v_last_alert_time IS NULL
-           OR TIMESTAMPDIFF(SECOND, v_last_alert_time, NOW()) >= 10 THEN
-            CALL sp_log_message(
-                p_sim_id,
-                'TEMPERATURE',
-                'ALERTA_TEMPERATURA',
-                'High temperature alert',
-                p_hora,
-                p_val
-            );
-        END IF;
+        CALL sp_log_message(
+            p_sim_id,
+            'TEMPERATURE',
+            'ALERTA_TEMPERATURA',
+            'High temperature alert',
+            p_hora,
+            p_val
+        );
     END IF;
 
-    /* maximo atingido: >=25 e <60 */
     IF p_val >= 25 AND p_val < 60 THEN
         CALL simulacao_bloquear(
             p_sim_id,
@@ -3740,36 +3807,6 @@ INSERT INTO `Simulacao` (`IDSimulacao`, `IDUtilizadorCriador`, `Descricao`, `Dat
 (57, 1, NULL, NULL, '2026-03-26 15:02:51', 'Terminada'),
 (58, 1, NULL, NULL, '2026-03-26 15:22:10', 'Terminada');
 
---
--- 触发器 `Simulacao`
---
-DELIMITER $$
-CREATE TRIGGER `before_start_simulacao` BEFORE UPDATE ON `Simulacao` FOR EACH ROW BEGIN
-    IF NEW.Estado = 'ACorrer' AND OLD.Estado <> 'ACorrer' THEN
-
-        IF OLD.Estado <> 'PorIniciar' THEN
-            SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'Apenas simulacoes em estado PorIniciar podem passar para ACorrer';
-        END IF;
-
-        IF EXISTS (
-        SELECT 1
-        FROM Simulacao
-        WHERE IDSimulacao <> NEW.IDSimulacao
-         AND Estado IN ('ACorrer', 'Blocked')
-         ) THEN
-          SIGNAL SQLSTATE '45000'
-          SET MESSAGE_TEXT = 'Ja existe outra simulacao em execucao local';
-        END IF;
-        
-        UPDATE Corridor
-          SET Active = 1;
-
-    END IF;
-END
-$$
-DELIMITER ;
-
 -- --------------------------------------------------------
 
 --
@@ -4123,6 +4160,9 @@ INSERT INTO `Som` (`IDSom`, `Hora`, `Som`, `IDSimulacao`) VALUES
 --
 DELIMITER $$
 CREATE TRIGGER `before_insert_som` BEFORE INSERT ON `Som` FOR EACH ROW BEGIN
+    DECLARE v_estado VARCHAR(20) DEFAULT NULL;
+    DECLARE v_msg VARCHAR(255) DEFAULT NULL;
+
     IF NEW.Hora IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Sound event invalid: Hour is NULL';
@@ -4146,6 +4186,24 @@ CREATE TRIGGER `before_insert_som` BEFORE INSERT ON `Som` FOR EACH ROW BEGIN
     IF NEW.IDSimulacao IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Sound event invalid: simulation is NULL';
+    END IF;
+
+    SELECT Estado
+      INTO v_estado
+      FROM Simulacao
+     WHERE IDSimulacao = NEW.IDSimulacao
+     LIMIT 1;
+
+    IF v_estado IS NULL THEN
+        SET v_msg = CONCAT('Sound event invalid: simulation ', NEW.IDSimulacao, ' does not exist');
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = v_msg;
+    END IF;
+
+    IF v_estado <> 'ACorrer' THEN
+        SET v_msg = CONCAT('Sound event invalid: simulation ', NEW.IDSimulacao, ' is not accepting sound events');
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = v_msg;
     END IF;
 END
 $$
@@ -4564,6 +4622,9 @@ INSERT INTO `Temperatura` (`IDTemperatura`, `Hora`, `Temperatura`, `IDSimulacao`
 --
 DELIMITER $$
 CREATE TRIGGER `before_insert_temperatura` BEFORE INSERT ON `Temperatura` FOR EACH ROW BEGIN
+    DECLARE v_estado VARCHAR(20) DEFAULT NULL;
+    DECLARE v_msg VARCHAR(255) DEFAULT NULL;
+
     IF NEW.Hora IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Temperature event invalid: Hour is NULL';
@@ -4587,6 +4648,24 @@ CREATE TRIGGER `before_insert_temperatura` BEFORE INSERT ON `Temperatura` FOR EA
     IF NEW.IDSimulacao IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Temperature event invalid: simulation is NULL';
+    END IF;
+
+    SELECT Estado
+      INTO v_estado
+      FROM Simulacao
+     WHERE IDSimulacao = NEW.IDSimulacao
+     LIMIT 1;
+
+    IF v_estado IS NULL THEN
+        SET v_msg = CONCAT('Temperature event invalid: simulation ', NEW.IDSimulacao, ' does not exist');
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = v_msg;
+    END IF;
+
+    IF v_estado <> 'ACorrer' THEN
+        SET v_msg = CONCAT('Temperature event invalid: simulation ', NEW.IDSimulacao, ' is not accepting temperature events');
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = v_msg;
     END IF;
 END
 $$
