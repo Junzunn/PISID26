@@ -6,7 +6,7 @@ require_once __DIR__ . '/vendor/autoload.php';
 
 use PhpMqtt\Client\MqttClient;
 
-function publicar_inicio_simulacao(int $idSimulacao, int $equipa): void
+function publicar_inicio_simulacao(array $payload): void
 {
     $clientId = 'marsabirinto-php-' . bin2hex(random_bytes(4));
 
@@ -23,15 +23,11 @@ function publicar_inicio_simulacao(int $idSimulacao, int $equipa): void
         $mqtt->connect(null, true);
         $connected = true;
 
-        $payload = json_encode([
-            'type' => 'Start',
-            'simulacaoID' => $idSimulacao,
-            'equipa' => $equipa,
-        ], JSON_THROW_ON_ERROR);
+        $message = json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
 
         $mqtt->publish(
             MQTT_TOPIC,
-            $payload,
+            $message,
             MqttClient::QOS_AT_LEAST_ONCE
         );
 

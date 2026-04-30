@@ -9,24 +9,46 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('simulacoes.php');
 }
 
-$equipa = filter_input(INPUT_POST, 'equipa', FILTER_VALIDATE_INT);
-$descricao = trim($_POST['descricao'] ?? '');
-
-if ($equipa === false || $equipa === null || $equipa <= 0) {
-    set_flash('error', 'Equipa deve ser maior que zero.');
-    redirect('simulacoes.php');
-}
-
-if ($descricao === '') {
-    $descricao = null;
-}
-
 try {
+    $descricao = nullable_string_from_post('descricao');
+
+    $tempoMaxRuido = nullable_string_from_post('tempo_max_ruido');
+    $tempoMinRuido = nullable_string_from_post('tempo_min_ruido');
+    $thresholdRuido = nullable_string_from_post('threshold_ruido');
+
+    $tempoMaxTemp = nullable_string_from_post('tempo_max_temp');
+    $tempoMinTemp = nullable_string_from_post('tempo_min_temp');
+    $thresholdTemp = nullable_string_from_post('threshold_temp');
+
+    $janelaOutliers = nullable_string_from_post('janela_outliers');
+    $variacaoOutlier = nullable_string_from_post('variacao_outlier');
+
     $pdo = db();
 
-    $stmt = $pdo->prepare('CALL simulacao_criar(:equipa, :descricao)');
-    $stmt->bindValue(':equipa', $equipa, PDO::PARAM_INT);
-    $stmt->bindValue(':descricao', $descricao, $descricao === null ? PDO::PARAM_NULL : PDO::PARAM_STR);
+    $stmt = $pdo->prepare(
+        'CALL simulacao_criar(
+            :descricao,
+            :tempo_max_ruido,
+            :tempo_min_ruido,
+            :threshold_ruido,
+            :tempo_max_temp,
+            :tempo_min_temp,
+            :threshold_temp,
+            :janela_outliers,
+            :variacao_outlier
+        )'
+    );
+
+    bind_nullable_string($stmt, ':descricao', $descricao);
+    bind_nullable_string($stmt, ':tempo_max_ruido', $tempoMaxRuido);
+    bind_nullable_string($stmt, ':tempo_min_ruido', $tempoMinRuido);
+    bind_nullable_string($stmt, ':threshold_ruido', $thresholdRuido);
+    bind_nullable_string($stmt, ':tempo_max_temp', $tempoMaxTemp);
+    bind_nullable_string($stmt, ':tempo_min_temp', $tempoMinTemp);
+    bind_nullable_string($stmt, ':threshold_temp', $thresholdTemp);
+    bind_nullable_string($stmt, ':janela_outliers', $janelaOutliers);
+    bind_nullable_string($stmt, ':variacao_outlier', $variacaoOutlier);
+
     $stmt->execute();
     $stmt->closeCursor();
 

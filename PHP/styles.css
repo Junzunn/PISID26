@@ -201,3 +201,22 @@ select {
     background: white;
     font: inherit;
 }
+
+.wide-page {
+    max-width: 1500px;
+}
+
+textarea::placeholder,
+input::placeholder {
+    color: #999;
+}
+
+td {
+    white-space: normal;
+}
+
+.row-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}

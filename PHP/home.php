@@ -6,7 +6,10 @@ require_once __DIR__ . '/auth.php';
 require_login();
 
 $user = current_user_info();
-$isAdmin = is_admin_user();
+
+$isRoot = $user && $user['Tipo'] === 'root';
+$isAdminApp = $user && $user['Tipo'] === 'AdminApp';
+$isEquipe = $user && $user['Tipo'] === 'Equipe';
 ?>
 
 <!doctype html>
@@ -33,11 +36,13 @@ $isAdmin = is_admin_user();
     </p>
 
     <div class="menu">
-        <a class="menu-card" href="simulacoes.php">
-            Lista de Simulacoes
-        </a>
+        <?php if ($isEquipe || $isRoot): ?>
+            <a class="menu-card" href="simulacoes.php">
+                Lista de Simulacoes
+            </a>
+        <?php endif; ?>
 
-        <?php if ($isAdmin): ?>
+        <?php if ($isAdminApp || $isRoot): ?>
             <a class="menu-card" href="utilizadores.php">
                 Gestao de Utilizadores
             </a>
