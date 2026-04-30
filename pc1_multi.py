@@ -1,10 +1,10 @@
 import os
+import sys
 import json
 import time
 import threading
 import subprocess
 from datetime import datetime
-from typing import Any, Dict, Optional
 
 import paho.mqtt.client as mqtt
 
@@ -15,9 +15,8 @@ MQTT_PORT = 1883
 TOPIC_FROM_PHP = "msgPHP"
 TOPIC_TO_SERVER = "PISID"
 
-CLIENT_ID = f"pc1-runner-{int(time.time())}"
+CLIENT_ID = f"pc1-{int(time.time())}"
 
-import sys
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -30,49 +29,18 @@ LOG_DIR = os.path.join(BASE_DIR, "logs")
 
 state_lock = threading.Lock()
 
-simulation_params_by_equipa: Dict[int, Dict[str, Any]] = {}
+simulation_params_by_equipa = {}
+running_by_equipa = {}
 
-running_by_equipa: Dict[int, Dict[str, Any]] = {}
 
-
-def publish_json(client: mqtt.Client, topic: str, payload: Dict[str, Any]) -> None:
+def publish_json(client, topic, payload):
     message = json.dumps(payload, ensure_ascii=False)
-
     result = client.publish(topic, message, qos=1)
     result.wait_for_publish()
-
-    print(f"[MQTT OUT] topic={topic} payload={message}")
-
-
-def ensure_mazerun_ready() -> None:
-    if not os.path.exists(MAZERUN_PATH):
-        raise FileNotFoundError(f"mazerun not found: {MAZERUN_PATH}")
-
-    if not os.access(MAZERUN_PATH, os.X_OK):
-        raise PermissionError(
-            f"mazerun exists but is not executable. Run: chmod +x {MAZERUN_PATH}"
-        )
+    print(f"[MQTT OUT] {topic}: {message}")
 
 
-def get_value(data: Dict[str, Any], *names: str) -> Optional[Any]:
-    for name in names:
-        if name in data:
-            return data[name]
-    return None
-
-
-def to_int(value: Any, field_name: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{field_name} must be an integer")
-
-
-def thread2_mazerun_worker(
-    client: mqtt.Client,
-    equipa: int,
-    id_simulacao: int
-) -> None:
+def mazerun_worker(client, equipa, id_simulacao):
     os.makedirs(LOG_DIR, exist_ok=True)
 
     log_path = os.path.join(
@@ -80,216 +48,109 @@ def thread2_mazerun_worker(
         f"mazerun_{id_simulacao}_{equipa}.log"
     )
 
-    return_code: Optional[int] = None
-    error_message: Optional[str] = None
+    print(f"[Mazerun Worker] start mazerun equipa={equipa}, IDSimulacao={id_simulacao}")
+    print(f"[Mazerun Worker] log: {log_path}")
 
-    try:
-        ensure_mazerun_ready()
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        log_file.write("\n==============================\n")
+        log_file.write(f"Start: {datetime.now().isoformat()}\n")
+        log_file.write(f"IDSimulacao: {id_simulacao}\n")
+        log_file.write(f"Equipa: {equipa}\n")
+        log_file.write(f"Command: {MAZERUN_PATH} {equipa} --flagMessage 1\n")
+        log_file.write("==============================\n")
+        log_file.flush()
 
-        print(f"[THREAD2] starting mazerun equipa={equipa}, IDSimulacao={id_simulacao}")
-
-        with open(log_path, "a", encoding="utf-8") as log_file:
-            log_file.write("\n==============================\n")
-            log_file.write(f"Start: {datetime.now().isoformat()}\n")
-            log_file.write(f"IDSimulacao: {id_simulacao}\n")
-            log_file.write(f"Equipa: {equipa}\n")
-            log_file.write(f"Command: {MAZERUN_PATH} {equipa} --flagMessage 1\n")
-            log_file.write("==============================\n")
-            log_file.flush()
-
-            process = subprocess.Popen(
-                [MAZERUN_PATH, str(equipa), "--flagMessage", "1"],
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
-
-            return_code = process.wait()
-
-            log_file.write("\n==============================\n")
-            log_file.write(f"End: {datetime.now().isoformat()}\n")
-            log_file.write(f"Return code: {return_code}\n")
-            log_file.write("==============================\n")
-            log_file.flush()
-
-    except Exception as e:
-        error_message = str(e)
-        print(
-            f"[THREAD2 ERROR] equipa={equipa}, "
-            f"IDSimulacao={id_simulacao}, error={error_message}"
+        process = subprocess.Popen(
+            [MAZERUN_PATH, str(equipa), "--flagMessage", "1"],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True
         )
 
-        with open(log_path, "a", encoding="utf-8") as log_file:
-            log_file.write("\n==============================\n")
-            log_file.write(f"Error: {datetime.now().isoformat()}\n")
-            log_file.write(f"{error_message}\n")
-            log_file.write("==============================\n")
+        return_code = process.wait()
 
-    finally:
-        with state_lock:
-            current = running_by_equipa.get(equipa)
+        log_file.write("\n==============================\n")
+        log_file.write(f"End: {datetime.now().isoformat()}\n")
+        log_file.write(f"Return code: {return_code}\n")
+        log_file.write("==============================\n")
+        log_file.flush()
 
-            if current and current["IDSimulacao"] == id_simulacao:
-                del running_by_equipa[equipa]
+    with state_lock:
+        running_by_equipa.pop(equipa, None)
 
-        if error_message is None and return_code == 0:
-            payload = {
-                "type": "End",
-                "event": "end_game",
-                "status": "ok",
-                "Equipa": equipa,
-                "playerid": equipa,
-                "IDSimulacao": id_simulacao
-            }
-        else:
-            payload = {
-                "type": "End",
-                "event": "end_game",
-                "status": "error",
-                "Equipa": equipa,
-                "playerid": equipa,
-                "IDSimulacao": id_simulacao,
-                "returnCode": return_code,
-                "error": error_message
-            }
+    publish_json(client, TOPIC_TO_SERVER, {
+        "type": "End",
+        "event": "end_game",
+        "Equipa": equipa,
+        "playerid": equipa,
+        "IDSimulacao": id_simulacao
+    })
 
-        publish_json(client, TOPIC_TO_SERVER, payload)
-
-        print(f"[THREAD2] finished equipa={equipa}, IDSimulacao={id_simulacao}")
-        print(f"[THREAD2] log saved at: {log_path}")
+    print(f"[Mazerun Worker] finished equipa={equipa}, IDSimulacao={id_simulacao}")
 
 
-def handle_start_message(client: mqtt.Client, data: Dict[str, Any]) -> None:
-    message_type = get_value(data, "type", "event")
-
-    if message_type not in ("Start", "start_game"):
-        print(f"[IGNORED] message type not Start: {message_type}")
-        return
-
-    id_simulacao_raw = get_value(data, "IDSimulacao", "idSimulacao", "idsimulacao")
-    equipa_raw = get_value(data, "Equipa", "equipa", "playerid", "playerID")
-
-    if id_simulacao_raw is None or equipa_raw is None:
-        publish_json(client, TOPIC_TO_SERVER, {
-            "type": "StartRejected",
-            "event": "start_game_rejected",
-            "status": "error",
-            "reason": "Missing IDSimulacao or Equipa",
-            "received": data
-        })
-        return
-
-    try:
-        id_simulacao = to_int(id_simulacao_raw, "IDSimulacao")
-        equipa = to_int(equipa_raw, "Equipa")
-    except ValueError as e:
-        publish_json(client, TOPIC_TO_SERVER, {
-            "type": "StartRejected",
-            "event": "start_game_rejected",
-            "status": "error",
-            "reason": str(e),
-            "received": data
-        })
-        return
+def handle_start(client, data):
+    id_simulacao = int(data["IDSimulacao"])
+    equipa = int(data["Equipa"])
 
     with state_lock:
         if equipa in running_by_equipa:
-            current = running_by_equipa[equipa]
-
-            publish_json(client, TOPIC_TO_SERVER, {
-                "type": "StartRejected",
-                "event": "start_game_rejected",
-                "status": "busy",
-                "reason": "This equipa is already running",
-                "Equipa": equipa,
-                "current_IDSimulacao": current["IDSimulacao"],
-                "new_IDSimulacao": id_simulacao
-            })
-
-            print(f"[REJECTED] equipa={equipa} already running")
+            print(f"[IGNORED] equipa={equipa} already running")
             return
 
-        simulation_params_by_equipa[equipa] = dict(data)
+        simulation_params_by_equipa[equipa] = data
 
         thread = threading.Thread(
-            target=thread2_mazerun_worker,
+            target=mazerun_worker,
             args=(client, equipa, id_simulacao),
             daemon=True
         )
 
         running_by_equipa[equipa] = {
             "IDSimulacao": id_simulacao,
-            "started_at": datetime.now().isoformat(),
             "thread": thread
         }
 
         thread.start()
 
-    print(f"[ACCEPTED] equipa={equipa}, IDSimulacao={id_simulacao}")
-    print(f"[PARAMS SAVED] {json.dumps(data, ensure_ascii=False)}")
+    print(f"[START] equipa={equipa}, IDSimulacao={id_simulacao}")
+    print(f"[PARAMS] {json.dumps(data, ensure_ascii=False)}")
 
 
-def on_connect(client: mqtt.Client, userdata: Any, flags: Any, reason_code: Any, properties: Any = None) -> None:
-    print(f"[MQTT] connected to {MQTT_BROKER}:{MQTT_PORT}, reason={reason_code}")
-
+def on_connect(client, userdata, flags, reason_code, properties=None):
+    print(f"[MQTT] connected to {MQTT_BROKER}:{MQTT_PORT}")
     client.subscribe(TOPIC_FROM_PHP, qos=1)
-
-    print(f"[MQTT] subscribed topic: {TOPIC_FROM_PHP}")
-
-
-def on_message(client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> None:
-    try:
-        payload_text = msg.payload.decode("utf-8")
-        print(f"[MQTT IN] topic={msg.topic} payload={payload_text}")
-
-        data = json.loads(payload_text)
-
-        if msg.topic == TOPIC_FROM_PHP:
-            handle_start_message(client, data)
-
-    except json.JSONDecodeError:
-        publish_json(client, TOPIC_TO_SERVER, {
-            "type": "StartRejected",
-            "event": "start_game_rejected",
-            "status": "error",
-            "reason": "Invalid JSON",
-            "raw": msg.payload.decode("utf-8", errors="ignore")
-        })
-
-    except Exception as e:
-        publish_json(client, TOPIC_TO_SERVER, {
-            "type": "PC1Error",
-            "event": "pc1_error",
-            "status": "error",
-            "error": str(e)
-        })
+    print(f"[MQTT] subscribed: {TOPIC_FROM_PHP}")
 
 
-def create_mqtt_client() -> mqtt.Client:
-    try:
-        client = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION2,
-            client_id=CLIENT_ID
-        )
-    except AttributeError:
-        client = mqtt.Client(client_id=CLIENT_ID)
+def on_message(client, userdata, msg):
+    payload = msg.payload.decode("utf-8")
+    print(f"[MQTT IN] {msg.topic}: {payload}")
+
+    data = json.loads(payload)
+
+    if msg.topic == TOPIC_FROM_PHP and data["type"] == "Start":
+        handle_start(client, data)
+
+
+def main():
+    print("[PC1] starting")
+    print(f"[PC1] base dir: {BASE_DIR}")
+    print(f"[PC1] mazerun: {MAZERUN_PATH}")
+    print(f"[PC1] log dir: {LOG_DIR}")
+
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id=CLIENT_ID
+    )
 
     client.on_connect = on_connect
     client.on_message = on_message
 
-    return client
-
-
-def main() -> None:
-    print("[PC1] starting...")
-    print(f"[PC1] base dir: {BASE_DIR}")
-    print(f"[PC1] mazerun path: {MAZERUN_PATH}")
-    print(f"[PC1] log dir: {LOG_DIR}")
-
-    client = create_mqtt_client()
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
     client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
 
-    print("[PC1] waiting for MQTT messages...")
+    print("[PC1] waiting for MQTT messages")
     client.loop_forever()
 
 
