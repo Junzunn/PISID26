@@ -23,8 +23,8 @@ MYSQL = {
 
 filas = {}
 threads = {}
-fim_pendente = set()
 ids_em_fila = set()
+simulacoes_ocupadas = set()
 
 lock = threading.Lock()
 
@@ -40,10 +40,13 @@ def publicar(payload):
 def ready_loop():
     while True:
         with lock:
-            ocupado = bool(ids_em_fila) or bool(fim_pendente)
+            busy = sorted(simulacoes_ocupadas)
 
-        if not ocupado:
-            publicar({"from": "PC2", "type": "READY"})
+        publicar({
+            "from": "PC2",
+            "type": "READY",
+            "busy": busy,
+        })
 
         time.sleep(1.5)
 
@@ -63,6 +66,13 @@ def chamar_sp(conn, cur, nome, args):
 def hora(doc):
     return doc["payload"].get("Hour", doc["received_at"].replace("T", " ").split(".")[0])
 
+
+def registar_fim_jogo(conn, cur, simulacao_id):
+    try:
+        chamar_sp(conn, cur, "simulacao_registar_fim", [simulacao_id])
+    except mysql.connector.Error as e:
+        if "ja foi registado" not in str(e):
+            raise
 
 def migrar(conn, cur, doc):
     sid = int(doc["simulacaoID"])
@@ -112,6 +122,9 @@ def migrar(conn, cur, doc):
             int(payload["Status"]),
         ])
 
+    elif tipo == "fim_jogo":
+        registar_fim_jogo(conn, cur, sid)
+
 
 def worker(simulacao_id):
     fila = filas[simulacao_id]
@@ -123,19 +136,8 @@ def worker(simulacao_id):
                 seq, mongo_id, doc = fila.get(timeout=0.5)
             except Empty:
                 with lock:
-                    terminar = simulacao_id in fim_pendente
-
-                if terminar:
-                    chamar_sp(conn, cur, "simulacao_registar_fim", [simulacao_id])
-
-                    with lock:
-                        fim_pendente.discard(simulacao_id)
-                        filas.pop(simulacao_id, None)
-                        threads.pop(simulacao_id, None)
-
-                    print(f"[cleanup] mqtt_mysql simulacaoID={simulacao_id}")
-                    return
-
+                    if fila.empty():
+                        simulacoes_ocupadas.discard(simulacao_id)
                 continue
 
             while True:
@@ -149,13 +151,26 @@ def worker(simulacao_id):
                     time.sleep(2)
                     conn, cur = ligar_mysql()
 
-            publicar({"from": "PC2", "type": "ACK", "ids": [mongo_id]})
+            publicar({
+                "from": "PC2",
+                "type": "ACK",
+                "ids": [mongo_id],
+            })
 
             with lock:
                 ids_em_fila.discard(mongo_id)
 
             fila.task_done()
-            print(f"[migrado] simulacaoID={simulacao_id} seq={seq}")
+            print(f"[migrado] simulacaoID={simulacao_id} seq={seq} tipo={doc['tipo']}")
+
+            if doc["tipo"] == "fim_jogo":
+                with lock:
+                    filas.pop(simulacao_id, None)
+                    threads.pop(simulacao_id, None)
+                    simulacoes_ocupadas.discard(simulacao_id)
+
+                print(f"[cleanup] mqtt_mysql simulacaoID={simulacao_id}")
+                return
 
     finally:
         cur.close()
@@ -190,19 +205,10 @@ def receber_docs(docs):
 
             criar_worker(sid)
             ids_em_fila.add(mongo_id)
+            simulacoes_ocupadas.add(sid)
             filas[sid].put((int(doc["seq"]), mongo_id, doc))
 
     print(f"[DATA] recebidos {len(docs)} docs")
-
-
-def receber_end(payload):
-    sid = int(payload["IDSimulacao"])
-
-    with lock:
-        criar_worker(sid)
-        fim_pendente.add(sid)
-
-    print(f"[END_READY] simulacaoID={sid}")
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
@@ -218,9 +224,6 @@ def on_message(client, userdata, msg):
 
     if payload["type"] == "DATA":
         receber_docs(payload["docs"])
-
-    if payload["type"] == "END_READY":
-        receber_end(payload)
 
 
 def main():

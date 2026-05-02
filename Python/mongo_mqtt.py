@@ -16,7 +16,6 @@ MQTT_PORT = 1883
 
 TOPICO_PHP = "msgPHP"
 TOPICO_PC1_PC2 = "PC1_PC2"
-TOPICO_PISID = "PISID"
 TOPICO_ATUADOR = "pisid_mazeact"
 
 CLIENT_ID = f"mongo-mqtt-{uuid.uuid4().hex[:8]}"
@@ -39,7 +38,7 @@ saidas_por_sala = {}
 
 db = MongoClient(MONGO_URI)[MONGO_DB]
 dados_sensores = db["dados_sensores"]
-dados_atuador = db["dados_atuador"]
+dados_nao_migrados = db["dados_naoMigrados"]
 
 lock = threading.Lock()
 
@@ -47,9 +46,6 @@ filas = {}
 threads = {}
 estados = {}
 parametros = {}
-
-fim_pendente = set()
-simulacoes_finalizadas = set()
 ids_em_fila = set()
 
 ultimo_envio = 0.0
@@ -110,13 +106,17 @@ def comando_ac_off(player):
 def registar_atuador(simulacao_id, equipa, tipo, comando, origem):
     publicar(TOPICO_ATUADOR, comando)
 
-    dados_atuador.insert_one({
+    dados_nao_migrados.insert_one({
         "simulacaoID": simulacao_id,
-        "equipa": equipa,
-        "tipo": tipo,
-        "comando": comando,
-        "payload_origem": origem,
-        "sent_at": datetime.now(),
+        "tipo": "atuador",
+        "payload": {
+            "equipa": equipa,
+            "tipo_acao": tipo,
+            "comando": comando,
+            "payload_origem": origem,
+        },
+        "received_at": datetime.now(),
+        "categoria": "acao do atuador",
     })
 
 
@@ -143,16 +143,6 @@ def start_php(payload):
         criar_worker(simulacao_id)
 
     print(f"[Start] simulacaoID={simulacao_id} equipa={payload['Equipa']}")
-
-
-def end_pisid(payload):
-    simulacao_id = int(payload["IDSimulacao"])
-
-    with lock:
-        if simulacao_id not in simulacoes_finalizadas:
-            fim_pendente.add(simulacao_id)
-
-    print(f"[End recebido] simulacaoID={simulacao_id}")
 
 
 def escolher_porta_para_fechar(estado):
@@ -269,18 +259,8 @@ def worker(simulacao_id):
         try:
             seq, mongo_id, doc = fila.get(timeout=0.5)
         except Empty:
-            with lock:
-                terminar = simulacao_id in simulacoes_finalizadas
-
-            if terminar:
-                with lock:
-                    filas.pop(simulacao_id, None)
-                    threads.pop(simulacao_id, None)
-                    estados.pop(simulacao_id, None)
-                    parametros.pop(simulacao_id, None)
-                    simulacoes_finalizadas.discard(simulacao_id)
-
-                print(f"[cleanup] mongo_mqtt simulacaoID={simulacao_id}")
+            if fim_jogo_migrado(simulacao_id):
+                limpar_simulacao(simulacao_id)
                 return
 
             continue
@@ -339,13 +319,7 @@ def distribuir_docs():
             mongo_id = str(doc["_id"])
 
             with lock:
-                if simulacao_id not in estados:
-                    continue
-
-                if simulacao_id in simulacoes_finalizadas:
-                    continue
-
-                if mongo_id in ids_em_fila:
+                if simulacao_id not in estados or mongo_id in ids_em_fila:
                     continue
 
                 criar_worker(simulacao_id)
@@ -365,14 +339,19 @@ def serializar(doc):
     }
 
 
-def enviar_lote():
+def enviar_lote(payload_ready):
     global ultimo_envio
 
     if time.time() - ultimo_envio < 1:
         return
 
+    busy = set(int(x) for x in payload_ready.get("busy", []))
+
     with lock:
-        simulacoes = list(estados.keys() | fim_pendente)
+        simulacoes = [
+            simulacao_id for simulacao_id in estados.keys()
+            if simulacao_id not in busy
+        ]
 
     docs_para_enviar = []
 
@@ -412,32 +391,27 @@ def marcar_migrados(ids):
     )
 
 
-def verificar_fins():
+def fim_jogo_migrado(simulacao_id):
+    return dados_sensores.count_documents({
+        "simulacaoID": simulacao_id,
+        "tipo": "fim_jogo",
+        "migrated": True,
+    }) > 0
+
+
+def limpar_simulacao(simulacao_id):
     with lock:
-        simulacoes = list(fim_pendente)
+        filas.pop(simulacao_id, None)
+        threads.pop(simulacao_id, None)
+        estados.pop(simulacao_id, None)
+        parametros.pop(simulacao_id, None)
 
-    for simulacao_id in simulacoes:
-        pendentes = dados_sensores.count_documents({
-            "simulacaoID": simulacao_id,
-            "$or": [{"checked": False}, {"migrated": False}],
-        })
-
-        if pendentes == 0:
-            enviar_pc2({
-                "from": "PC1",
-                "type": "END_READY",
-                "IDSimulacao": simulacao_id,
-            })
-
-            with lock:
-                fim_pendente.discard(simulacao_id)
-                simulacoes_finalizadas.add(simulacao_id)
+    print(f"[cleanup] mongo_mqtt simulacaoID={simulacao_id}")
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     client.subscribe(TOPICO_PHP, qos=1)
     client.subscribe(TOPICO_PC1_PC2, qos=1)
-    client.subscribe(TOPICO_PISID, qos=1)
     print("[MQTT] ligado")
 
 
@@ -447,12 +421,9 @@ def on_message(client, userdata, msg):
     if msg.topic == TOPICO_PHP and payload["type"] == "Start":
         start_php(payload)
 
-    if msg.topic == TOPICO_PISID and payload["type"] == "End":
-        end_pisid(payload)
-
     if msg.topic == TOPICO_PC1_PC2 and payload["from"] == "PC2":
         if payload["type"] == "READY":
-            enviar_lote()
+            enviar_lote(payload)
 
         if payload["type"] == "ACK":
             marcar_migrados(payload["ids"])
@@ -470,9 +441,9 @@ def main():
 
     while True:
         distribuir_docs()
-        verificar_fins()
         time.sleep(0.1)
 
 
 if __name__ == "__main__":
     main()
+    

@@ -15,7 +15,6 @@ MQTT_BROKER = "broker.emqx.io"
 MQTT_PORT = 1883
 
 TOPICO_PHP = "msgPHP"
-TOPICO_PC2 = "PISID"
 
 TOPICOS_SENSORES = [
     ("pisid_mazemov_+", "movimento"),
@@ -103,12 +102,6 @@ def ligar_mongo():
     dados_nao_migrados = db["dados_naoMigrados"]
 
     print(f"[Mongo] ligado a {MONGO_DB}")
-
-
-def publicar_json(client, topic, payload):
-    msg = json.dumps(payload, ensure_ascii=False)
-    client.publish(topic, msg, qos=1).wait_for_publish()
-    print(f"[MQTT OUT] {topic}: {msg}")
 
 
 def tipo_e_equipa_do_topico(topic):
@@ -230,6 +223,26 @@ def guardar_mensagem_invalida(equipa, tipo, payload, received_at, categoria):
     print(f"[dados_naoMigrados] simulacaoID={id_simulacao} tipo={tipo} categoria={categoria}")
 
 
+def guardar_fim_jogo(equipa):
+    id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
+    seq = proximo_seq(equipa)
+
+    dados_sensores.insert_one({
+        "simulacaoID": id_simulacao,
+        "seq": seq,
+        "tipo": "fim_jogo",
+        "payload": {
+            "Equipa": equipa,
+        },
+        "received_at": datetime.now(),
+        "alerta": False,
+        "checked": True,
+        "migrated": False,
+    })
+
+    print(f"[fim_jogo] simulacaoID={id_simulacao} seq={seq}")
+
+
 def processar_mensagem(equipa, mensagem):
     tipo = mensagem["tipo"]
     payload = mensagem["payload"]
@@ -246,7 +259,7 @@ def processar_mensagem(equipa, mensagem):
     guardar_mensagem_valida(equipa, tipo, payload, received_at)
 
 
-def worker_equipa(client, equipa):
+def worker_equipa(equipa):
     fila = filas_por_equipa[equipa]
     id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
 
@@ -288,12 +301,7 @@ def worker_equipa(client, equipa):
                 log_file.flush()
                 break
 
-    publicar_json(client, TOPICO_PC2, {
-        "type": "End",
-        "IDSimulacao": id_simulacao,
-        "Equipa": equipa,
-        "playerid": equipa,
-    })
+    guardar_fim_jogo(equipa)
 
     with lock:
         filas_por_equipa.pop(equipa, None)
@@ -305,7 +313,7 @@ def worker_equipa(client, equipa):
     print(f"[cleanup] nuvem_mongo equipa={equipa}, IDSimulacao={id_simulacao}")
 
 
-def tratar_start_php(client, payload):
+def tratar_start_php(payload):
     id_simulacao = int(payload["IDSimulacao"])
     equipa = int(payload["Equipa"])
 
@@ -324,7 +332,7 @@ def tratar_start_php(client, payload):
 
         thread = threading.Thread(
             target=worker_equipa,
-            args=(client, equipa),
+            args=(equipa,),
             daemon=True,
             name=f"worker_equipa_{equipa}",
         )
@@ -353,7 +361,7 @@ def on_message(client, userdata, msg):
 
     if msg.topic == TOPICO_PHP:
         if payload["type"] == "Start":
-            tratar_start_php(client, payload)
+            tratar_start_php(payload)
         return
 
     tipo, equipa = tipo_e_equipa_do_topico(msg.topic)
