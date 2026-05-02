@@ -1,6 +1,7 @@
 import json
 import time
 import threading
+import uuid
 from queue import PriorityQueue, Empty
 from datetime import datetime
 
@@ -17,6 +18,8 @@ TOPICO_PHP = "msgPHP"
 TOPICO_PC1_PC2 = "PC1_PC2"
 TOPICO_PISID = "PISID"
 TOPICO_ATUADOR = "pisid_mazeact"
+
+CLIENT_ID = f"mongo-mqtt-{uuid.uuid4().hex[:8]}"
 
 MAZE_DB = {
     "host": "194.210.86.10",
@@ -51,7 +54,7 @@ ids_em_fila = set()
 
 ultimo_envio = 0.0
 
-mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mongo_mqtt")
+mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
 
 
 def carregar_maze():
@@ -127,7 +130,7 @@ def criar_estado(simulacao_id):
         "ocupacao": {},
         "score": {},
         "ac_ligado": False,
-        "porta_fechada": None,
+        "portas_fechadas": set(),
     }
 
 
@@ -146,48 +149,71 @@ def end_pisid(payload):
     simulacao_id = int(payload["IDSimulacao"])
 
     with lock:
-        if simulacao_id in simulacoes_finalizadas:
-            return
-        fim_pendente.add(simulacao_id)
+        if simulacao_id not in simulacoes_finalizadas:
+            fim_pendente.add(simulacao_id)
 
     print(f"[End recebido] simulacaoID={simulacao_id}")
 
 
-def tratar_temperatura_ou_som(doc):
+def escolher_porta_para_fechar(estado):
+    candidatas = []
+
+    for origem, destinos in saidas_por_sala.items():
+        abertas = [
+            destino for destino in destinos
+            if (origem, destino) not in estado["portas_fechadas"]
+        ]
+
+        if abertas:
+            candidatas.append((len(abertas), origem, abertas[0]))
+
+    if not candidatas:
+        return None
+
+    _, origem, destino = max(candidatas)
+    return origem, destino
+
+
+def tratar_temperatura(doc):
     simulacao_id = int(doc["simulacaoID"])
-    tipo = doc["tipo"]
     payload = doc["payload"]
     estado = estados[simulacao_id]
     equipa = int(parametros[simulacao_id]["Equipa"])
 
-    if tipo == "temperatura":
-        valor = float(payload["Temperature"])
-        alerta = detectar_alerta(tipo, valor, simulacao_id)
+    valor = float(payload["Temperature"])
+    alerta = detectar_alerta("temperatura", valor, simulacao_id)
 
-        if alerta and not estado["ac_ligado"]:
-            registar_atuador(simulacao_id, equipa, tipo, comando_ac_on(equipa), payload)
-            estado["ac_ligado"] = True
+    if alerta and not estado["ac_ligado"]:
+        registar_atuador(simulacao_id, equipa, "temperatura", comando_ac_on(equipa), payload)
+        estado["ac_ligado"] = True
 
-        if valor < float(setupmaze["normaltemperature"]) and estado["ac_ligado"]:
-            registar_atuador(simulacao_id, equipa, tipo, comando_ac_off(equipa), payload)
-            estado["ac_ligado"] = False
+    if valor < float(setupmaze["normaltemperature"]) and estado["ac_ligado"]:
+        registar_atuador(simulacao_id, equipa, "temperatura", comando_ac_off(equipa), payload)
+        estado["ac_ligado"] = False
 
-        return alerta
+    return alerta
+
+
+def tratar_som(doc):
+    simulacao_id = int(doc["simulacaoID"])
+    payload = doc["payload"]
+    estado = estados[simulacao_id]
+    equipa = int(parametros[simulacao_id]["Equipa"])
 
     valor = float(payload["Sound"])
-    alerta = detectar_alerta(tipo, valor, simulacao_id)
+    alerta = detectar_alerta("som", valor, simulacao_id)
 
     if alerta:
-        origem = max(saidas_por_sala, key=lambda sala: len(saidas_por_sala[sala]))
-        destino = saidas_por_sala[origem][0]
+        porta = escolher_porta_para_fechar(estado)
 
-        if estado["porta_fechada"] != (origem, destino):
-            registar_atuador(simulacao_id, equipa, tipo, comando_close_door(equipa, origem, destino), payload)
-            estado["porta_fechada"] = (origem, destino)
+        if porta is not None:
+            origem, destino = porta
+            registar_atuador(simulacao_id, equipa, "som", comando_close_door(equipa, origem, destino), payload)
+            estado["portas_fechadas"].add((origem, destino))
 
-    if valor < float(setupmaze["normalnoise"]) and estado["porta_fechada"]:
-        registar_atuador(simulacao_id, equipa, tipo, comando_open_all_door(equipa), payload)
-        estado["porta_fechada"] = None
+    if valor < float(setupmaze["normalnoise"]) and estado["portas_fechadas"]:
+        registar_atuador(simulacao_id, equipa, "som", comando_open_all_door(equipa), payload)
+        estado["portas_fechadas"].clear()
 
     return alerta
 
@@ -198,18 +224,17 @@ def mudar_ocupacao(ocupacao, sala, grupo, delta):
 
 
 def tentar_score(simulacao_id, equipa, sala, payload):
-    estado = estados[simulacao_id]
-    ocupacao = estado["ocupacao"].get(sala)
+    ocupacao = estados[simulacao_id]["ocupacao"].get(sala)
 
     if not ocupacao:
         return
 
     if ocupacao["odd"] == ocupacao["even"] and ocupacao["odd"] != 0:
-        tentativas = estado["score"].get(sala, 0)
+        tentativas = estados[simulacao_id]["score"].get(sala, 0)
 
         if tentativas < 3:
             registar_atuador(simulacao_id, equipa, "score", comando_score(equipa, sala), payload)
-            estado["score"][sala] = tentativas + 1
+            estados[simulacao_id]["score"][sala] = tentativas + 1
 
 
 def tratar_movimento(doc):
@@ -222,17 +247,19 @@ def tratar_movimento(doc):
     marsami = int(payload["Marsami"])
     status = int(payload["Status"])
 
-    if status == 2 or destino == 0:
+    if status == 2:
         return
 
     grupo = "odd" if marsami % 2 == 0 else "even"
     ocupacao = estados[simulacao_id]["ocupacao"]
 
-    mudar_ocupacao(ocupacao, origem, grupo, -1)
-    mudar_ocupacao(ocupacao, destino, grupo, 1)
+    if origem != 0:
+        mudar_ocupacao(ocupacao, origem, grupo, -1)
+        tentar_score(simulacao_id, equipa, origem, payload)
 
-    tentar_score(simulacao_id, equipa, origem, payload)
-    tentar_score(simulacao_id, equipa, destino, payload)
+    if destino != 0:
+        mudar_ocupacao(ocupacao, destino, grupo, 1)
+        tentar_score(simulacao_id, equipa, destino, payload)
 
 
 def worker(simulacao_id):
@@ -243,24 +270,30 @@ def worker(simulacao_id):
             seq, mongo_id, doc = fila.get(timeout=0.5)
         except Empty:
             with lock:
-                if simulacao_id in simulacoes_finalizadas:
+                terminar = simulacao_id in simulacoes_finalizadas
+
+            if terminar:
+                with lock:
                     filas.pop(simulacao_id, None)
                     threads.pop(simulacao_id, None)
                     estados.pop(simulacao_id, None)
                     parametros.pop(simulacao_id, None)
                     simulacoes_finalizadas.discard(simulacao_id)
 
-                    print(f"[cleanup] mongo_mqtt simulacaoID={simulacao_id}")
-                    return
+                print(f"[cleanup] mongo_mqtt simulacaoID={simulacao_id}")
+                return
 
             continue
 
         alerta = False
 
-        if doc["tipo"] in ("temperatura", "som"):
-            alerta = tratar_temperatura_ou_som(doc)
+        if doc["tipo"] == "temperatura":
+            alerta = tratar_temperatura(doc)
 
-        if doc["tipo"] == "movimento":
+        elif doc["tipo"] == "som":
+            alerta = tratar_som(doc)
+
+        elif doc["tipo"] == "movimento":
             tratar_movimento(doc)
 
         dados_sensores.update_one(
@@ -293,25 +326,31 @@ def criar_worker(simulacao_id):
 
 
 def distribuir_docs():
-    docs = dados_sensores.find({"checked": False}).sort([("simulacaoID", 1), ("seq", 1)])
+    with lock:
+        simulacoes = list(estados.keys())
 
-    for doc in docs:
-        simulacao_id = int(doc["simulacaoID"])
-        mongo_id = str(doc["_id"])
+    for simulacao_id in simulacoes:
+        docs = dados_sensores.find({
+            "simulacaoID": simulacao_id,
+            "checked": False,
+        }).sort("seq", 1)
 
-        with lock:
-            if simulacao_id not in estados:
-                continue
+        for doc in docs:
+            mongo_id = str(doc["_id"])
 
-            if simulacao_id in simulacoes_finalizadas:
-                continue
+            with lock:
+                if simulacao_id not in estados:
+                    continue
 
-            if mongo_id in ids_em_fila:
-                continue
+                if simulacao_id in simulacoes_finalizadas:
+                    continue
 
-            criar_worker(simulacao_id)
-            ids_em_fila.add(mongo_id)
-            filas[simulacao_id].put((int(doc["seq"]), mongo_id, doc))
+                if mongo_id in ids_em_fila:
+                    continue
+
+                criar_worker(simulacao_id)
+                ids_em_fila.add(mongo_id)
+                filas[simulacao_id].put((int(doc["seq"]), mongo_id, doc))
 
 
 def serializar(doc):
@@ -332,18 +371,35 @@ def enviar_lote():
     if time.time() - ultimo_envio < 1:
         return
 
-    docs = list(
-        dados_sensores
-        .find({"checked": True, "migrated": False})
-        .sort([("simulacaoID", 1), ("seq", 1)])
-        .limit(BATCH_SIZE)
-    )
+    with lock:
+        simulacoes = list(estados.keys() | fim_pendente)
 
-    if docs:
+    docs_para_enviar = []
+
+    for simulacao_id in simulacoes:
+        limite = BATCH_SIZE - len(docs_para_enviar)
+
+        if limite <= 0:
+            break
+
+        docs = list(
+            dados_sensores
+            .find({
+                "simulacaoID": simulacao_id,
+                "checked": True,
+                "migrated": False,
+            })
+            .sort("seq", 1)
+            .limit(limite)
+        )
+
+        docs_para_enviar.extend(docs)
+
+    if docs_para_enviar:
         enviar_pc2({
             "from": "PC1",
             "type": "DATA",
-            "docs": [serializar(doc) for doc in docs],
+            "docs": [serializar(doc) for doc in docs_para_enviar],
         })
 
     ultimo_envio = time.time()
@@ -397,6 +453,7 @@ def on_message(client, userdata, msg):
     if msg.topic == TOPICO_PC1_PC2 and payload["from"] == "PC2":
         if payload["type"] == "READY":
             enviar_lote()
+
         if payload["type"] == "ACK":
             marcar_migrados(payload["ids"])
 

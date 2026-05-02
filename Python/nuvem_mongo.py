@@ -1,11 +1,11 @@
-import os
-import sys
 import json
-import time
-import threading
+import os
 import subprocess
-from collections import deque
+import sys
+import threading
+import uuid
 from datetime import datetime
+from queue import Queue, Empty
 
 import mysql.connector
 import paho.mqtt.client as mqtt
@@ -23,7 +23,7 @@ TOPICOS_SENSORES = [
     ("pisid_mazesound_+", "som"),
 ]
 
-CLIENT_ID = f"pc1-{int(time.time())}"
+CLIENT_ID = f"nuvem-mongo-{uuid.uuid4().hex[:8]}"
 
 MAZE_DB_CONFIG = {
     "host": "194.210.86.10",
@@ -56,31 +56,20 @@ FORMATOS_HORA = [
     "%Y-%m-%d %H:%M:%S.%f",
 ]
 
-
-# =========================
-# GLOBAL STATE
-# =========================
-
 setupmaze = {}
 corredores = set()
-
-mensagens_deque = deque()
-mensagens_lock = threading.Lock()
-
-estado_lock = threading.Lock()
-simulacao_ativa_por_equipa = {}
-parametros_por_equipa = {}
-seq_por_equipa = {}
-mazerun_por_equipa = {}
 
 mongo_client = None
 dados_sensores = None
 dados_nao_migrados = None
 
+lock = threading.Lock()
+filas_por_equipa = {}
+threads_por_equipa = {}
+simulacao_ativa_por_equipa = {}
+parametros_por_equipa = {}
+seq_por_equipa = {}
 
-# =========================
-# MYSQL MAZE
-# =========================
 
 def carregar_dados_maze():
     global setupmaze, corredores
@@ -91,12 +80,7 @@ def carregar_dados_maze():
     cursor.execute("SELECT * FROM setupmaze LIMIT 1")
     setupmaze = cursor.fetchone()
 
-    cursor.execute("""
-        SELECT Rooma, Roomb
-        FROM corridor
-        WHERE active = 1
-    """)
-
+    cursor.execute("SELECT Rooma, Roomb FROM corridor WHERE active = 1")
     corredores = {
         (int(row["Rooma"]), int(row["Roomb"]))
         for row in cursor.fetchall()
@@ -108,10 +92,6 @@ def carregar_dados_maze():
     print(f"[Maze DB] setupmaze: {setupmaze}")
     print(f"[Maze DB] corredores ativos: {len(corredores)}")
 
-
-# =========================
-# MONGO
-# =========================
 
 def ligar_mongo():
     global mongo_client, dados_sensores, dados_nao_migrados
@@ -125,15 +105,10 @@ def ligar_mongo():
     print(f"[Mongo] ligado a {MONGO_DB}")
 
 
-# =========================
-# MQTT HELPERS
-# =========================
-
 def publicar_json(client, topic, payload):
-    message = json.dumps(payload, ensure_ascii=False)
-    result = client.publish(topic, message, qos=1)
-    result.wait_for_publish()
-    print(f"[MQTT OUT] {topic}: {message}")
+    msg = json.dumps(payload, ensure_ascii=False)
+    client.publish(topic, msg, qos=1).wait_for_publish()
+    print(f"[MQTT OUT] {topic}: {msg}")
 
 
 def tipo_e_equipa_do_topico(topic):
@@ -148,10 +123,6 @@ def tipo_e_equipa_do_topico(topic):
     return "som", equipa
 
 
-# =========================
-# VALIDACAO
-# =========================
-
 def converter_hora(valor):
     for formato in FORMATOS_HORA:
         try:
@@ -163,18 +134,12 @@ def converter_hora(valor):
 
 
 def corrigir_hora_se_necessario(payload, received_at):
-    hora = converter_hora(payload["Hour"])
-
-    if hora is None:
+    if "Hour" in payload and converter_hora(payload["Hour"]) is None:
         payload["Hour"] = received_at.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def validar_mensagem(tipo, payload, received_at, equipa):
     erros = []
-
-    if tipo not in ["temperatura", "som", "movimento"]:
-        erros.append("Tipo de mensagem desconhecido: " + tipo)
-        return erros
 
     campos_em_falta = CAMPOS_OBRIGATORIOS[tipo] - set(payload.keys())
     if campos_em_falta:
@@ -184,22 +149,21 @@ def validar_mensagem(tipo, payload, received_at, equipa):
     if int(payload["Player"]) != equipa:
         erros.append("Player nao corresponde ao topico MQTT")
 
-    if "Hour" in payload:
-        corrigir_hora_se_necessario(payload, received_at)
+    corrigir_hora_se_necessario(payload, received_at)
 
     if tipo == "temperatura":
         if float(payload["Temperature"]) < 0:
             erros.append("temperatura negativa")
 
-    if tipo == "som":
+    elif tipo == "som":
         if float(payload["Sound"]) < 0:
             erros.append("som negativo")
 
-    if tipo == "movimento":
+    elif tipo == "movimento":
         marsami = int(payload["Marsami"])
         player = int(payload["Player"])
-        sala_origem = int(payload["RoomOrigin"])
-        sala_destino = int(payload["RoomDestiny"])
+        origem = int(payload["RoomOrigin"])
+        destino = int(payload["RoomDestiny"])
         status = int(payload["Status"])
 
         if marsami < 0:
@@ -208,17 +172,17 @@ def validar_mensagem(tipo, payload, received_at, equipa):
         if player < 0:
             erros.append("player negativo")
 
-        if sala_origem < 0:
+        if origem < 0:
             erros.append("sala origem negativa")
 
-        if sala_destino < 0:
+        if destino < 0:
             erros.append("sala destino negativa")
 
         if status < 0:
             erros.append("status negativo")
 
-        if status != 2 and sala_destino != 0:
-            if (sala_origem, sala_destino) not in corredores:
+        if status != 2 and origem != 0 and destino != 0:
+            if (origem, destino) not in corredores:
                 erros.append("movimento nao corresponde a corredor ativo")
 
     return erros
@@ -229,26 +193,68 @@ def detetar_outlier(tipo, payload, equipa):
     return False
 
 
-# =========================
-# SEQ
-# =========================
-
 def proximo_seq(equipa):
     seq_por_equipa[equipa] += 1
     return seq_por_equipa[equipa]
 
 
-# =========================
-# MAZERUN WORKER
-# =========================
+def guardar_mensagem_valida(equipa, tipo, payload, received_at):
+    id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
+    seq = proximo_seq(equipa)
 
-def mazerun_worker(client, equipa, id_simulacao):
+    dados_sensores.insert_one({
+        "simulacaoID": id_simulacao,
+        "seq": seq,
+        "tipo": tipo,
+        "payload": payload,
+        "received_at": received_at,
+        "alerta": False,
+        "checked": False,
+        "migrated": False,
+    })
+
+    print(f"[dados_sensores] simulacaoID={id_simulacao} seq={seq} tipo={tipo}")
+
+
+def guardar_mensagem_invalida(equipa, tipo, payload, received_at, categoria):
+    id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
+
+    dados_nao_migrados.insert_one({
+        "simulacaoID": id_simulacao,
+        "tipo": tipo,
+        "payload": payload,
+        "received_at": received_at,
+        "categoria": categoria,
+    })
+
+    print(f"[dados_naoMigrados] simulacaoID={id_simulacao} tipo={tipo} categoria={categoria}")
+
+
+def processar_mensagem(equipa, mensagem):
+    tipo = mensagem["tipo"]
+    payload = mensagem["payload"]
+    received_at = mensagem["received_at"]
+
+    erros = validar_mensagem(tipo, payload, received_at, equipa)
+    outlier = detetar_outlier(tipo, payload, equipa)
+
+    if erros or outlier:
+        categoria = "outlier" if outlier else "invalido: " + "; ".join(erros)
+        guardar_mensagem_invalida(equipa, tipo, payload, received_at, categoria)
+        return
+
+    guardar_mensagem_valida(equipa, tipo, payload, received_at)
+
+
+def worker_equipa(client, equipa):
+    fila = filas_por_equipa[equipa]
+    id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
+
     os.makedirs(LOG_DIR, exist_ok=True)
-
     log_path = os.path.join(LOG_DIR, f"mazerun_{id_simulacao}_{equipa}.log")
 
-    print(f"[Mazerun Worker] start equipa={equipa}, IDSimulacao={id_simulacao}")
-    print(f"[Mazerun Worker] log: {log_path}")
+    print(f"[worker_equipa] start equipa={equipa}, IDSimulacao={id_simulacao}")
+    print(f"[worker_equipa] log: {log_path}")
 
     with open(log_path, "a", encoding="utf-8") as log_file:
         log_file.write("\n==============================\n")
@@ -259,24 +265,28 @@ def mazerun_worker(client, equipa, id_simulacao):
         log_file.write("==============================\n")
         log_file.flush()
 
-        process = subprocess.Popen(
+        processo = subprocess.Popen(
             [MAZERUN_PATH, str(equipa), "--flagMessage", "1"],
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
         )
 
-        return_code = process.wait()
+        while True:
+            try:
+                mensagem = fila.get(timeout=0.05)
+                processar_mensagem(equipa, mensagem)
+                fila.task_done()
+            except Empty:
+                pass
 
-        log_file.write("\n==============================\n")
-        log_file.write(f"End: {datetime.now().isoformat()}\n")
-        log_file.write(f"Return code: {return_code}\n")
-        log_file.write("==============================\n")
-        log_file.flush()
-
-    with estado_lock:
-        mazerun_por_equipa.pop(equipa, None)
-        simulacao_ativa_por_equipa.pop(equipa, None)
+            if processo.poll() is not None and fila.empty():
+                log_file.write("\n==============================\n")
+                log_file.write(f"End: {datetime.now().isoformat()}\n")
+                log_file.write(f"Return code: {processo.returncode}\n")
+                log_file.write("==============================\n")
+                log_file.flush()
+                break
 
     publicar_json(client, TOPICO_PC2, {
         "type": "End",
@@ -285,116 +295,46 @@ def mazerun_worker(client, equipa, id_simulacao):
         "playerid": equipa,
     })
 
-    print(f"[Mazerun Worker] end equipa={equipa}, IDSimulacao={id_simulacao}")
+    with lock:
+        filas_por_equipa.pop(equipa, None)
+        threads_por_equipa.pop(equipa, None)
+        simulacao_ativa_por_equipa.pop(equipa, None)
+        parametros_por_equipa.pop(equipa, None)
+        seq_por_equipa.pop(equipa, None)
 
+    print(f"[cleanup] nuvem_mongo equipa={equipa}, IDSimulacao={id_simulacao}")
 
-# =========================
-# PHP START
-# =========================
 
 def tratar_start_php(client, payload):
     id_simulacao = int(payload["IDSimulacao"])
     equipa = int(payload["Equipa"])
 
-    with estado_lock:
-        if equipa in mazerun_por_equipa:
+    with lock:
+        if equipa in threads_por_equipa:
             print(f"[Start ignorado] equipa={equipa} ja esta a correr")
             return
 
+        filas_por_equipa[equipa] = Queue()
         parametros_por_equipa[equipa] = payload
-
         simulacao_ativa_por_equipa[equipa] = {
             "IDSimulacao": id_simulacao,
             "Equipa": equipa,
         }
-
         seq_por_equipa[equipa] = 0
 
-        with mensagens_lock:
-            mensagens_filtradas = [
-                mensagem for mensagem in mensagens_deque
-                if mensagem["equipa"] != equipa
-            ]
-            mensagens_deque.clear()
-            mensagens_deque.extend(mensagens_filtradas)
-
         thread = threading.Thread(
-            target=mazerun_worker,
-            args=(client, equipa, id_simulacao),
+            target=worker_equipa,
+            args=(client, equipa),
             daemon=True,
+            name=f"worker_equipa_{equipa}",
         )
 
-        mazerun_por_equipa[equipa] = thread
+        threads_por_equipa[equipa] = thread
         thread.start()
 
     print(f"[Start] equipa={equipa}, IDSimulacao={id_simulacao}")
     print(f"[Parametros] {json.dumps(payload, ensure_ascii=False)}")
 
-
-# =========================
-# THREAD1 - PROCESSAR MENSAGENS
-# =========================
-
-def processar_mensagens():
-    while True:
-        with mensagens_lock:
-            if mensagens_deque:
-                mensagem = mensagens_deque.popleft()
-            else:
-                mensagem = None
-
-        if mensagem is None:
-            time.sleep(0.05)
-            continue
-
-        tipo = mensagem["tipo"]
-        equipa = mensagem["equipa"]
-        payload = mensagem["payload"]
-        received_at = mensagem["received_at"]
-
-        with estado_lock:
-            if equipa not in simulacao_ativa_por_equipa:
-                continue
-
-            id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
-
-        erros = validar_mensagem(tipo, payload, received_at, equipa)
-        outlier = detetar_outlier(tipo, payload, equipa)
-
-        if erros or outlier:
-            categoria = "outlier" if outlier else "invalido: " + "; ".join(erros)
-
-            dados_nao_migrados.insert_one({
-                "simulacaoID": id_simulacao,
-                "tipo": tipo,
-                "payload": payload,
-                "received_at": received_at,
-                "categoria": categoria,
-            })
-
-            print(f"[dados_naoMigrados] simulacaoID={id_simulacao} tipo={tipo} categoria={categoria}")
-            continue
-
-        with estado_lock:
-            seq = proximo_seq(equipa)
-
-        dados_sensores.insert_one({
-            "simulacaoID": id_simulacao,
-            "seq": seq,
-            "tipo": tipo,
-            "payload": payload,
-            "received_at": received_at,
-            "alerta": False,
-            "checked": False,
-            "migrated": False,
-        })
-
-        print(f"[dados_sensores] simulacaoID={id_simulacao} seq={seq} tipo={tipo}")
-
-
-# =========================
-# MQTT CALLBACKS
-# =========================
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     print(f"[MQTT] ligado a {MQTT_BROKER}:{MQTT_PORT}")
@@ -418,8 +358,11 @@ def on_message(client, userdata, msg):
 
     tipo, equipa = tipo_e_equipa_do_topico(msg.topic)
 
-    with mensagens_lock:
-        mensagens_deque.append({
+    with lock:
+        fila = filas_por_equipa.get(equipa)
+
+    if fila is not None:
+        fila.put({
             "topic": msg.topic,
             "tipo": tipo,
             "equipa": equipa,
@@ -428,25 +371,14 @@ def on_message(client, userdata, msg):
         })
 
 
-# =========================
-# MAIN
-# =========================
-
 def main():
-    print("[PC1] start")
-    print(f"[PC1] base dir: {BASE_DIR}")
-    print(f"[PC1] mazerun: {MAZERUN_PATH}")
-    print(f"[PC1] log dir: {LOG_DIR}")
+    print("[nuvem_mongo] start")
+    print(f"[nuvem_mongo] base dir: {BASE_DIR}")
+    print(f"[nuvem_mongo] mazerun: {MAZERUN_PATH}")
+    print(f"[nuvem_mongo] log dir: {LOG_DIR}")
 
     carregar_dados_maze()
     ligar_mongo()
-
-    thread1 = threading.Thread(
-        target=processar_mensagens,
-        daemon=True,
-        name="thread1_processar_mensagens",
-    )
-    thread1.start()
 
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
@@ -459,7 +391,7 @@ def main():
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
 
-    print("[PC1] a aguardar mensagens MQTT")
+    print("[nuvem_mongo] a aguardar mensagens MQTT")
     client.loop_forever()
 
 

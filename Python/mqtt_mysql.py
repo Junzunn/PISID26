@@ -1,6 +1,7 @@
 import json
 import time
 import threading
+import uuid
 from queue import PriorityQueue, Empty
 
 import mysql.connector
@@ -10,6 +11,8 @@ import paho.mqtt.client as mqtt
 MQTT_BROKER = "broker.emqx.io"
 MQTT_PORT = 1883
 TOPICO_PC1_PC2 = "PC1_PC2"
+
+CLIENT_ID = f"mqtt-mysql-{uuid.uuid4().hex[:8]}"
 
 MYSQL = {
     "host": "127.0.0.1",
@@ -25,7 +28,7 @@ ids_em_fila = set()
 
 lock = threading.Lock()
 
-mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mqtt_mysql")
+mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
 
 
 def publicar(payload):
@@ -45,20 +48,23 @@ def ready_loop():
         time.sleep(1.5)
 
 
-def chamar_sp(nome, args):
+def ligar_mysql():
     conn = mysql.connector.connect(**MYSQL)
     cur = conn.cursor()
+    return conn, cur
+
+
+def chamar_sp(conn, cur, nome, args):
+    conn.ping(reconnect=True, attempts=3, delay=2)
     cur.callproc(nome, args)
     conn.commit()
-    cur.close()
-    conn.close()
 
 
 def hora(doc):
     return doc["payload"].get("Hour", doc["received_at"].replace("T", " ").split(".")[0])
 
 
-def migrar(doc):
+def migrar(conn, cur, doc):
     sid = int(doc["simulacaoID"])
     seq = int(doc["seq"])
     tipo = doc["tipo"]
@@ -67,10 +73,10 @@ def migrar(doc):
 
     if tipo == "temperatura":
         valor = str(payload["Temperature"])
-        chamar_sp("sp_registar_temperatura", [sid, seq, h, valor])
+        chamar_sp(conn, cur, "sp_registar_temperatura", [sid, seq, h, valor])
 
         if doc["alerta"]:
-            chamar_sp("sp_registar_mensagem", [
+            chamar_sp(conn, cur, "sp_registar_mensagem", [
                 sid,
                 seq,
                 h,
@@ -82,10 +88,10 @@ def migrar(doc):
 
     elif tipo == "som":
         valor = str(payload["Sound"])
-        chamar_sp("sp_registar_som", [sid, seq, h, valor])
+        chamar_sp(conn, cur, "sp_registar_som", [sid, seq, h, valor])
 
         if doc["alerta"]:
-            chamar_sp("sp_registar_mensagem", [
+            chamar_sp(conn, cur, "sp_registar_mensagem", [
                 sid,
                 seq,
                 h,
@@ -96,7 +102,7 @@ def migrar(doc):
             ])
 
     elif tipo == "movimento":
-        chamar_sp("sp_registar_movimento", [
+        chamar_sp(conn, cur, "sp_registar_movimento", [
             sid,
             seq,
             h,
@@ -109,42 +115,51 @@ def migrar(doc):
 
 def worker(simulacao_id):
     fila = filas[simulacao_id]
+    conn, cur = ligar_mysql()
 
-    while True:
-        try:
-            seq, mongo_id, doc = fila.get(timeout=0.5)
-        except Empty:
-            with lock:
-                terminar = simulacao_id in fim_pendente
-
-            if terminar:
-                chamar_sp("simulacao_registar_fim", [simulacao_id])
-
-                with lock:
-                    fim_pendente.discard(simulacao_id)
-                    filas.pop(simulacao_id, None)
-                    threads.pop(simulacao_id, None)
-
-                print(f"[cleanup] mqtt_mysql simulacaoID={simulacao_id}")
-                return
-
-            continue
-
+    try:
         while True:
             try:
-                migrar(doc)
-                break
-            except mysql.connector.Error as e:
-                print(f"[MySQL retry] simulacaoID={simulacao_id} seq={seq}: {e}")
-                time.sleep(2)
+                seq, mongo_id, doc = fila.get(timeout=0.5)
+            except Empty:
+                with lock:
+                    terminar = simulacao_id in fim_pendente
 
-        publicar({"from": "PC2", "type": "ACK", "ids": [mongo_id]})
+                if terminar:
+                    chamar_sp(conn, cur, "simulacao_registar_fim", [simulacao_id])
 
-        with lock:
-            ids_em_fila.discard(mongo_id)
+                    with lock:
+                        fim_pendente.discard(simulacao_id)
+                        filas.pop(simulacao_id, None)
+                        threads.pop(simulacao_id, None)
 
-        fila.task_done()
-        print(f"[migrado] simulacaoID={simulacao_id} seq={seq}")
+                    print(f"[cleanup] mqtt_mysql simulacaoID={simulacao_id}")
+                    return
+
+                continue
+
+            while True:
+                try:
+                    migrar(conn, cur, doc)
+                    break
+                except mysql.connector.Error as e:
+                    print(f"[MySQL retry] simulacaoID={simulacao_id} seq={seq}: {e}")
+                    cur.close()
+                    conn.close()
+                    time.sleep(2)
+                    conn, cur = ligar_mysql()
+
+            publicar({"from": "PC2", "type": "ACK", "ids": [mongo_id]})
+
+            with lock:
+                ids_em_fila.discard(mongo_id)
+
+            fila.task_done()
+            print(f"[migrado] simulacaoID={simulacao_id} seq={seq}")
+
+    finally:
+        cur.close()
+        conn.close()
 
 
 def criar_worker(simulacao_id):
