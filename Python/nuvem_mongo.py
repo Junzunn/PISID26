@@ -11,15 +11,15 @@ import mysql.connector
 import paho.mqtt.client as mqtt
 from pymongo import MongoClient
 
+
 MQTT_BROKER = "broker.emqx.io"
 MQTT_PORT = 1883
-
 TOPICO_PHP = "msgPHP"
 
-TOPICOS_SENSORES = [
-    ("pisid_mazemov_+", "movimento"),
-    ("pisid_mazetemp_+", "temperatura"),
-    ("pisid_mazesound_+", "som"),
+TOPICOS_SENSORES_BASE = [
+    "pisid_mazemov",
+    "pisid_mazetemp",
+    "pisid_mazesound",
 ]
 
 CLIENT_ID = f"nuvem-mongo-{uuid.uuid4().hex[:8]}"
@@ -102,6 +102,25 @@ def ligar_mongo():
     dados_nao_migrados = db["dados_naoMigrados"]
 
     print(f"[Mongo] ligado a {MONGO_DB}")
+
+
+def topicos_da_equipa(equipa):
+    return [
+        f"{base}_{equipa}"
+        for base in TOPICOS_SENSORES_BASE
+    ]
+
+
+def subscrever_equipa(client, equipa):
+    for topic in topicos_da_equipa(equipa):
+        client.subscribe(topic, qos=1)
+        print(f"[MQTT] subscrito: {topic}")
+
+
+def remover_subscricao_equipa(client, equipa):
+    for topic in topicos_da_equipa(equipa):
+        client.unsubscribe(topic)
+        print(f"[MQTT] unsubscribe: {topic}")
 
 
 def tipo_e_equipa_do_topico(topic):
@@ -259,10 +278,11 @@ def processar_mensagem(equipa, mensagem):
     guardar_mensagem_valida(equipa, tipo, payload, received_at)
 
 
-def worker_equipa(equipa):
+def worker_equipa(client, equipa):
     fila = filas_por_equipa[equipa]
     id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
 
+    subscrever_equipa(client, equipa)
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, f"mazerun_{id_simulacao}_{equipa}.log")
 
@@ -302,6 +322,7 @@ def worker_equipa(equipa):
                 break
 
     guardar_fim_jogo(equipa)
+    remover_subscricao_equipa(client, equipa)
 
     with lock:
         filas_por_equipa.pop(equipa, None)
@@ -313,7 +334,7 @@ def worker_equipa(equipa):
     print(f"[cleanup] nuvem_mongo equipa={equipa}, IDSimulacao={id_simulacao}")
 
 
-def tratar_start_php(payload):
+def tratar_start_php(client, payload):
     id_simulacao = int(payload["IDSimulacao"])
     equipa = int(payload["Equipa"])
 
@@ -332,7 +353,7 @@ def tratar_start_php(payload):
 
         thread = threading.Thread(
             target=worker_equipa,
-            args=(equipa,),
+            args=(client, equipa),
             daemon=True,
             name=f"worker_equipa_{equipa}",
         )
@@ -350,10 +371,6 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     client.subscribe(TOPICO_PHP, qos=1)
     print(f"[MQTT] subscrito: {TOPICO_PHP}")
 
-    for topic, _ in TOPICOS_SENSORES:
-        client.subscribe(topic, qos=1)
-        print(f"[MQTT] subscrito: {topic}")
-
 
 def on_message(client, userdata, msg):
     payload = json.loads(msg.payload.decode("utf-8"))
@@ -361,7 +378,7 @@ def on_message(client, userdata, msg):
 
     if msg.topic == TOPICO_PHP:
         if payload["type"] == "Start":
-            tratar_start_php(payload)
+            tratar_start_php(client, payload)
         return
 
     tipo, equipa = tipo_e_equipa_do_topico(msg.topic)
