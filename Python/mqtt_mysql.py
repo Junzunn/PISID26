@@ -17,7 +17,7 @@ CLIENT_ID = f"mqtt-mysql-{uuid.uuid4().hex[:8]}"
 MYSQL = {
     "host": "127.0.0.1",
     "user": "software@pisid.pt",
-    "password": "password",
+    "password": "softwarepisid",
     "database": "Marsabirinto",
 }
 
