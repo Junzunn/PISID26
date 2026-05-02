@@ -172,8 +172,11 @@ def corrigir_hora_se_necessario(payload, received_at):
 def validar_mensagem(tipo, payload, received_at, equipa):
     erros = []
 
-    campos_em_falta = CAMPOS_OBRIGATORIOS[tipo] - set(payload.keys())
+    if tipo not in ["temperatura", "som", "movimento"]:
+        erros.append("Tipo de mensagem desconhecido: " + tipo)
+        return erros
 
+    campos_em_falta = CAMPOS_OBRIGATORIOS[tipo] - set(payload.keys())
     if campos_em_falta:
         erros.append("campos em falta: " + ", ".join(sorted(campos_em_falta)))
         return erros

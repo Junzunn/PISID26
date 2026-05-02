@@ -1,7 +1,7 @@
 import json
 import time
 import threading
-from queue import PriorityQueue
+from queue import PriorityQueue, Empty
 from datetime import datetime
 
 import mysql.connector
@@ -39,11 +39,16 @@ dados_sensores = db["dados_sensores"]
 dados_atuador = db["dados_atuador"]
 
 lock = threading.Lock()
+
 filas = {}
+threads = {}
 estados = {}
 parametros = {}
+
 fim_pendente = set()
+simulacoes_finalizadas = set()
 ids_em_fila = set()
+
 ultimo_envio = 0.0
 
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mongo_mqtt")
@@ -60,6 +65,7 @@ def carregar_maze():
 
     cur.execute("SELECT Rooma, Roomb FROM corridor WHERE active = 1")
     saidas_por_sala = {}
+
     for row in cur.fetchall():
         saidas_por_sala.setdefault(int(row["Rooma"]), []).append(int(row["Roomb"]))
 
@@ -138,7 +144,12 @@ def start_php(payload):
 
 def end_pisid(payload):
     simulacao_id = int(payload["IDSimulacao"])
-    fim_pendente.add(simulacao_id)
+
+    with lock:
+        if simulacao_id in simulacoes_finalizadas:
+            return
+        fim_pendente.add(simulacao_id)
+
     print(f"[End recebido] simulacaoID={simulacao_id}")
 
 
@@ -228,7 +239,21 @@ def worker(simulacao_id):
     fila = filas[simulacao_id]
 
     while True:
-        seq, mongo_id, doc = fila.get()
+        try:
+            seq, mongo_id, doc = fila.get(timeout=0.5)
+        except Empty:
+            with lock:
+                if simulacao_id in simulacoes_finalizadas:
+                    filas.pop(simulacao_id, None)
+                    threads.pop(simulacao_id, None)
+                    estados.pop(simulacao_id, None)
+                    parametros.pop(simulacao_id, None)
+                    simulacoes_finalizadas.discard(simulacao_id)
+
+                    print(f"[cleanup] mongo_mqtt simulacaoID={simulacao_id}")
+                    return
+
+            continue
 
         alerta = False
 
@@ -255,7 +280,16 @@ def criar_worker(simulacao_id):
         return
 
     filas[simulacao_id] = PriorityQueue()
-    threading.Thread(target=worker, args=(simulacao_id,), daemon=True).start()
+
+    thread = threading.Thread(
+        target=worker,
+        args=(simulacao_id,),
+        daemon=True,
+        name=f"mongo_worker_{simulacao_id}",
+    )
+
+    threads[simulacao_id] = thread
+    thread.start()
 
 
 def distribuir_docs():
@@ -266,13 +300,18 @@ def distribuir_docs():
         mongo_id = str(doc["_id"])
 
         with lock:
-            if simulacao_id not in estados or mongo_id in ids_em_fila:
+            if simulacao_id not in estados:
+                continue
+
+            if simulacao_id in simulacoes_finalizadas:
+                continue
+
+            if mongo_id in ids_em_fila:
                 continue
 
             criar_worker(simulacao_id)
             ids_em_fila.add(mongo_id)
-
-        filas[simulacao_id].put((int(doc["seq"]), mongo_id, doc))
+            filas[simulacao_id].put((int(doc["seq"]), mongo_id, doc))
 
 
 def serializar(doc):
@@ -318,7 +357,10 @@ def marcar_migrados(ids):
 
 
 def verificar_fins():
-    for simulacao_id in list(fim_pendente):
+    with lock:
+        simulacoes = list(fim_pendente)
+
+    for simulacao_id in simulacoes:
         pendentes = dados_sensores.count_documents({
             "simulacaoID": simulacao_id,
             "$or": [{"checked": False}, {"migrated": False}],
@@ -330,7 +372,10 @@ def verificar_fins():
                 "type": "END_READY",
                 "IDSimulacao": simulacao_id,
             })
-            fim_pendente.remove(simulacao_id)
+
+            with lock:
+                fim_pendente.discard(simulacao_id)
+                simulacoes_finalizadas.add(simulacao_id)
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):

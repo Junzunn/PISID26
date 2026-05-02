@@ -19,8 +19,10 @@ MYSQL = {
 }
 
 filas = {}
+threads = {}
 fim_pendente = set()
 ids_em_fila = set()
+
 lock = threading.Lock()
 
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mqtt_mysql")
@@ -35,7 +37,7 @@ def publicar(payload):
 def ready_loop():
     while True:
         with lock:
-            ocupado = bool(ids_em_fila)
+            ocupado = bool(ids_em_fila) or bool(fim_pendente)
 
         if not ocupado:
             publicar({"from": "PC2", "type": "READY"})
@@ -68,14 +70,30 @@ def migrar(doc):
         chamar_sp("sp_registar_temperatura", [sid, seq, h, valor])
 
         if doc["alerta"]:
-            chamar_sp("sp_registar_mensagem", [sid, seq, h, "1", float(valor), "Temperatura", "Alerta de temperatura"])
+            chamar_sp("sp_registar_mensagem", [
+                sid,
+                seq,
+                h,
+                "1",
+                float(valor),
+                "Temperatura",
+                "Alerta de temperatura",
+            ])
 
     elif tipo == "som":
         valor = str(payload["Sound"])
         chamar_sp("sp_registar_som", [sid, seq, h, valor])
 
         if doc["alerta"]:
-            chamar_sp("sp_registar_mensagem", [sid, seq, h, "2", float(valor), "Som", "Alerta de som"])
+            chamar_sp("sp_registar_mensagem", [
+                sid,
+                seq,
+                h,
+                "2",
+                float(valor),
+                "Som",
+                "Alerta de som",
+            ])
 
     elif tipo == "movimento":
         chamar_sp("sp_registar_movimento", [
@@ -96,10 +114,20 @@ def worker(simulacao_id):
         try:
             seq, mongo_id, doc = fila.get(timeout=0.5)
         except Empty:
-            if simulacao_id in fim_pendente:
+            with lock:
+                terminar = simulacao_id in fim_pendente
+
+            if terminar:
                 chamar_sp("simulacao_registar_fim", [simulacao_id])
-                fim_pendente.remove(simulacao_id)
-                print(f"[fim] simulacaoID={simulacao_id}")
+
+                with lock:
+                    fim_pendente.discard(simulacao_id)
+                    filas.pop(simulacao_id, None)
+                    threads.pop(simulacao_id, None)
+
+                print(f"[cleanup] mqtt_mysql simulacaoID={simulacao_id}")
+                return
+
             continue
 
         while True:
@@ -124,7 +152,16 @@ def criar_worker(simulacao_id):
         return
 
     filas[simulacao_id] = PriorityQueue()
-    threading.Thread(target=worker, args=(simulacao_id,), daemon=True).start()
+
+    thread = threading.Thread(
+        target=worker,
+        args=(simulacao_id,),
+        daemon=True,
+        name=f"mysql_worker_{simulacao_id}",
+    )
+
+    threads[simulacao_id] = thread
+    thread.start()
 
 
 def receber_docs(docs):
@@ -187,4 +224,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
