@@ -1,0 +1,13 @@
+Options -Indexes
+DirectoryIndex login.php
+
+RewriteEngine On
+RewriteBase /marsabirinto/
+
+RewriteCond %{REQUEST_METHOD} =GET
+RewriteCond %{THE_REQUEST} \s/+marsabirinto/([^\s?]+)\.php[\s?] [NC]
+RewriteRule ^(.+)\.php$ $1 [R=302,L]
+
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_FILENAME}.php -f
+RewriteRule ^(.+)$ $1.php [L]

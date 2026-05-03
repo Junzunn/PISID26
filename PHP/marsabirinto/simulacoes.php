@@ -290,6 +290,17 @@ try {
 
         document.getElementById('editarSimulacaoDialog').showModal();
     }
+
+    document.addEventListener('submit', function (event) {
+        const form = event.target;
+        const button = form.querySelector('button[type="submit"]');
+
+        if (button) {
+            button.disabled = true;
+            button.innerText = 'A iniciar...';
+        }
+    });
+
 </script>
 </body>
 </html>

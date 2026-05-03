@@ -12,7 +12,7 @@ function publicar_inicio_simulacao(array $payload): void
     $ultimoErro = null;
 
     for ($tentativa = 1; $tentativa <= 5; $tentativa++) {
-        $clientId = 'marsabirinto-php-' . bin2hex(random_bytes(8));
+        $clientId = 'marsabirinto-php-' . bin2hex(random_bytes(16));
 
         $mqtt = new MqttClient(
             MQTT_BROKER,
@@ -41,14 +41,13 @@ function publicar_inicio_simulacao(array $payload): void
 
             if ($tentativa < 5) {
                 usleep($tentativa * 500000);
-                continue;
             }
 
         } finally {
             if ($connected) {
                 try {
                     $mqtt->disconnect();
-                } catch (Throwable) {
+                } catch (Throwable $ex) {
                 }
             }
         }
