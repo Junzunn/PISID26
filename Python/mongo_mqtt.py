@@ -74,7 +74,7 @@ def carregar_maze():
 
 
 def publicar(topic, texto):
-    mqtt_client.publish(topic, texto, qos=1).wait_for_publish()
+    mqtt_client.publish(topic, texto, qos=1)
     print(f"[MQTT OUT] {topic}: {texto}")
 
 

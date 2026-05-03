@@ -128,12 +128,6 @@ def subscrever_equipa(client, equipa):
         print(f"[MQTT] subscrito: {topic}")
 
 
-def remover_subscricao_equipa(client, equipa):
-    for topic in topicos_da_equipa(equipa):
-        client.unsubscribe(topic)
-        print(f"[MQTT] unsubscribe: {topic}")
-
-
 def tipo_e_equipa_do_topico(topic):
     equipa = int(topic.rsplit("_", 1)[1])
 
@@ -373,7 +367,6 @@ def worker_equipa(client, equipa):
         while True:
             if not processo_terminou and processo.poll() is not None:
                 processo_terminou = True
-                remover_subscricao_equipa(client, equipa)
 
                 log_file.write("\n==============================\n")
                 log_file.write(f"End: {datetime.now().isoformat()}\n")
@@ -443,6 +436,12 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
     client.subscribe(TOPICO_PHP, qos=1)
     print(f"[MQTT] subscrito: {TOPICO_PHP}")
+
+    with lock:
+        equipas = list(filas_por_equipa.keys())
+
+    for equipa in equipas:
+        subscrever_equipa(client, equipa)
 
 
 def on_message(client, userdata, msg):
