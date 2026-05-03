@@ -22,7 +22,6 @@ MYSQL = {
 }
 
 filas = {}
-threads = {}
 ids_em_fila = set()
 simulacoes_ocupadas = set()
 
@@ -166,7 +165,6 @@ def worker(simulacao_id):
             if doc["tipo"] == "fim_jogo":
                 with lock:
                     filas.pop(simulacao_id, None)
-                    threads.pop(simulacao_id, None)
                     simulacoes_ocupadas.discard(simulacao_id)
 
                 print(f"[cleanup] mqtt_mysql simulacaoID={simulacao_id}")
@@ -189,8 +187,6 @@ def criar_worker(simulacao_id):
         daemon=True,
         name=f"mysql_worker_{simulacao_id}",
     )
-
-    threads[simulacao_id] = thread
     thread.start()
 
 

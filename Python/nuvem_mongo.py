@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime
 from queue import Queue, Empty
@@ -10,7 +11,7 @@ from queue import Queue, Empty
 import mysql.connector
 import paho.mqtt.client as mqtt
 from pymongo import MongoClient
-
+from pymongo.errors import PyMongoError, ServerSelectionTimeoutError, AutoReconnect, DuplicateKeyError
 
 MQTT_BROKER = "broker.emqx.io"
 MQTT_PORT = 1883
@@ -31,7 +32,11 @@ MAZE_DB_CONFIG = {
     "database": "maze",
 }
 
-MONGO_URI = "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=rs0"
+MONGO_URI = ("mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/"
+            "?replicaSet=rs0"
+            "&retryWrites=true"
+            "&serverSelectionTimeoutMS=200"
+            "&connectTimeoutMS=1000")
 MONGO_DB = "Marsabirinto"
 
 if getattr(sys, "frozen", False):
@@ -95,9 +100,15 @@ def carregar_dados_maze():
 def ligar_mongo():
     global mongo_client, dados_sensores, dados_nao_migrados
 
-    mongo_client = MongoClient(MONGO_URI)
-    db = mongo_client[MONGO_DB]
+    try:
+        mongo_client = MongoClient(MONGO_URI)
+        mongo_client.admin.command("ping")
+    except ServerSelectionTimeoutError:
+        raise RuntimeError("[Mongo ERRO] MongoDB sem servico ou replica set sem primary")
+    except PyMongoError as e:
+        raise RuntimeError(f"[Mongo ERRO] falha ao ligar ao MongoDB: {e}")
 
+    db = mongo_client[MONGO_DB]
     dados_sensores = db["dados_sensores"]
     dados_nao_migrados = db["dados_naoMigrados"]
 
@@ -149,6 +160,18 @@ def corrigir_hora_se_necessario(payload, received_at):
     if "Hour" in payload and converter_hora(payload["Hour"]) is None:
         payload["Hour"] = received_at.strftime("%Y-%m-%d %H:%M:%S")
 
+def to_int(valor):
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        return None
+
+
+def to_float(valor):
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return None
 
 def validar_mensagem(tipo, payload, received_at, equipa):
     erros = []
@@ -158,43 +181,65 @@ def validar_mensagem(tipo, payload, received_at, equipa):
         erros.append("campos em falta: " + ", ".join(sorted(campos_em_falta)))
         return erros
 
-    if int(payload["Player"]) != equipa:
+    player = to_int(payload.get("Player"))
+    if player is None:
+        erros.append("Player invalido")
+        return erros
+
+    if player != equipa:
         erros.append("Player nao corresponde ao topico MQTT")
 
     corrigir_hora_se_necessario(payload, received_at)
 
     if tipo == "temperatura":
-        if float(payload["Temperature"]) < 0:
+        temperatura = to_float(payload.get("Temperature"))
+
+        if temperatura is None:
+            erros.append("Temperature invalido")
+        elif temperatura < 0:
             erros.append("temperatura negativa")
 
     elif tipo == "som":
-        if float(payload["Sound"]) < 0:
+        som = to_float(payload.get("Sound"))
+
+        if som is None:
+            erros.append("Sound invalido")
+        elif som < 0:
             erros.append("som negativo")
 
     elif tipo == "movimento":
-        marsami = int(payload["Marsami"])
-        player = int(payload["Player"])
-        origem = int(payload["RoomOrigin"])
-        destino = int(payload["RoomDestiny"])
-        status = int(payload["Status"])
+        marsami = to_int(payload.get("Marsami"))
+        origem = to_int(payload.get("RoomOrigin"))
+        destino = to_int(payload.get("RoomDestiny"))
+        status = to_int(payload.get("Status"))
 
-        if marsami < 0:
+        if marsami is None:
+            erros.append("Marsami invalido")
+        elif marsami < 0:
             erros.append("marsami negativo")
 
-        if player < 0:
-            erros.append("player negativo")
-
-        if origem < 0:
+        if origem is None:
+            erros.append("RoomOrigin invalido")
+        elif origem < 0:
             erros.append("sala origem negativa")
 
-        if destino < 0:
+        if destino is None:
+            erros.append("RoomDestiny invalido")
+        elif destino < 0:
             erros.append("sala destino negativa")
 
-        if status < 0:
+        if status is None:
+            erros.append("Status invalido")
+        elif status < 0:
             erros.append("status negativo")
 
-        if status != 2 and origem != 0 and destino != 0:
-            if (origem, destino) not in corredores:
+        if (status is not None
+            and origem is not None
+            and destino is not None
+            and status != 2
+            and origem != 0
+            and destino != 0
+            and (origem, destino) not in corredores):
                 erros.append("movimento nao corresponde a corredor ativo")
 
     return erros
@@ -209,12 +254,26 @@ def proximo_seq(equipa):
     seq_por_equipa[equipa] += 1
     return seq_por_equipa[equipa]
 
+def insert_com_retry(collection, doc):
+    while True:
+        try:
+            collection.insert_one(doc)
+            return
+        except DuplicateKeyError:
+            return
+        except ServerSelectionTimeoutError as e:
+            print(f"[Mongo retry] replica set sem primary: {e}")
+            time.sleep(1)
+        except AutoReconnect as e:
+            print(f"[Mongo retry] a aguardar primary: {e}")
+            time.sleep(1)
 
 def guardar_mensagem_valida(equipa, tipo, payload, received_at):
     id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
     seq = proximo_seq(equipa)
 
-    dados_sensores.insert_one({
+    doc = {
+        "_id": f"{id_simulacao}:{seq}",
         "simulacaoID": id_simulacao,
         "seq": seq,
         "tipo": tipo,
@@ -223,22 +282,24 @@ def guardar_mensagem_valida(equipa, tipo, payload, received_at):
         "alerta": False,
         "checked": False,
         "migrated": False,
-    })
+    }
 
+    insert_com_retry(dados_sensores, doc)
     print(f"[dados_sensores] simulacaoID={id_simulacao} seq={seq} tipo={tipo}")
 
 
 def guardar_mensagem_invalida(equipa, tipo, payload, received_at, categoria):
     id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
 
-    dados_nao_migrados.insert_one({
+    doc = {
         "simulacaoID": id_simulacao,
         "tipo": tipo,
         "payload": payload,
         "received_at": received_at,
         "categoria": categoria,
-    })
+    }
 
+    insert_com_retry(dados_nao_migrados, doc)
     print(f"[dados_naoMigrados] simulacaoID={id_simulacao} tipo={tipo} categoria={categoria}")
 
 
@@ -246,7 +307,8 @@ def guardar_fim_jogo(equipa):
     id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
     seq = proximo_seq(equipa)
 
-    dados_sensores.insert_one({
+    doc = {
+        "_id": f"{id_simulacao}:{seq}",
         "simulacaoID": id_simulacao,
         "seq": seq,
         "tipo": "fim_jogo",
@@ -257,8 +319,9 @@ def guardar_fim_jogo(equipa):
         "alerta": False,
         "checked": True,
         "migrated": False,
-    })
+    }
 
+    insert_com_retry(dados_sensores, doc)
     print(f"[fim_jogo] simulacaoID={id_simulacao} seq={seq}")
 
 
@@ -305,24 +368,34 @@ def worker_equipa(client, equipa):
             text=True,
         )
 
-        while True:
-            try:
-                mensagem = fila.get(timeout=0.05)
-                processar_mensagem(equipa, mensagem)
-                fila.task_done()
-            except Empty:
-                pass
+        processo_terminou = False
 
-            if processo.poll() is not None and fila.empty():
+        while True:
+            if not processo_terminou and processo.poll() is not None:
+                processo_terminou = True
+                remover_subscricao_equipa(client, equipa)
+
                 log_file.write("\n==============================\n")
                 log_file.write(f"End: {datetime.now().isoformat()}\n")
                 log_file.write(f"Return code: {processo.returncode}\n")
                 log_file.write("==============================\n")
                 log_file.flush()
-                break
 
-    guardar_fim_jogo(equipa)
-    remover_subscricao_equipa(client, equipa)
+            try:
+                mensagem = fila.get(timeout=0.05)
+            except Empty:
+                if processo_terminou:
+                    break
+                continue
+
+            try:
+                processar_mensagem(equipa, mensagem)
+            except Exception as e:
+                print(f"[erro mensagem] equipa={equipa}: {type(e).__name__}: {e}")
+            finally:
+                fila.task_done()
+
+        guardar_fim_jogo(equipa)
 
     with lock:
         filas_por_equipa.pop(equipa, None)
@@ -388,9 +461,7 @@ def on_message(client, userdata, msg):
 
     if fila is not None:
         fila.put({
-            "topic": msg.topic,
             "tipo": tipo,
-            "equipa": equipa,
             "payload": payload,
             "received_at": received_at,
         })

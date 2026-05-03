@@ -7,9 +7,8 @@ from datetime import datetime
 
 import mysql.connector
 import paho.mqtt.client as mqtt
-from bson import ObjectId
 from pymongo import MongoClient
-
+from pymongo.errors import ServerSelectionTimeoutError, AutoReconnect
 
 MQTT_BROKER = "broker.emqx.io"
 MQTT_PORT = 1883
@@ -102,11 +101,22 @@ def comando_ac_on(player):
 def comando_ac_off(player):
     return f"{{Type: AcOff, Player:{player}}}"
 
+def insert_nao_migrado_com_retry(doc):
+    while True:
+        try:
+            dados_nao_migrados.insert_one(doc)
+            return
+        except ServerSelectionTimeoutError as e:
+            print(f"[Mongo retry] dados_naoMigrados: {e}")
+            time.sleep(1)
+        except AutoReconnect as e:
+            print(f"[Mongo retry] a aguardar primary: {e}")
+            time.sleep(1)
 
 def registar_atuador(simulacao_id, equipa, tipo, comando, origem):
     publicar(TOPICO_ATUADOR, comando)
 
-    dados_nao_migrados.insert_one({
+    doc = {
         "simulacaoID": simulacao_id,
         "tipo": "atuador",
         "payload": {
@@ -117,7 +127,9 @@ def registar_atuador(simulacao_id, equipa, tipo, comando, origem):
         },
         "received_at": datetime.now(),
         "categoria": "acao do atuador",
-    })
+    }
+
+    insert_nao_migrado_com_retry(doc)
 
 
 def detectar_alerta(tipo, valor, simulacao_id):
@@ -338,6 +350,53 @@ def serializar(doc):
         "alerta": doc["alerta"],
     }
 
+def buscar_fim_jogo_pendente(simulacao_id):
+    return dados_sensores.find_one({
+        "simulacaoID": simulacao_id,
+        "tipo": "fim_jogo",
+        "checked": True,
+        "migrated": False,
+    })
+
+
+def arquivar_sensores_nao_migrados(simulacao_id):
+    docs = list(dados_sensores.find({
+        "simulacaoID": simulacao_id,
+        "tipo": {"$ne": "fim_jogo"},
+        "migrated": False,
+    }))
+
+    if not docs:
+        return
+
+    agora = datetime.now()
+
+    docs_arquivo = []
+    ids = []
+
+    for doc in docs:
+        ids.append(doc["_id"])
+
+        docs_arquivo.append({
+            "simulacaoID": doc["simulacaoID"],
+            "tipo": doc["tipo"],
+            "payload": {
+                "origem": "dados_sensores",
+                "mongo_id_original": str(doc["_id"]),
+                "seq": doc.get("seq"),
+                "payload_original": doc.get("payload"),
+                "received_at_original": doc.get("received_at"),
+                "checked": doc.get("checked"),
+                "migrated": doc.get("migrated"),
+                "alerta": doc.get("alerta"),
+            },
+            "received_at": agora,
+            "categoria": "Jogo acabou antes de migrar para MySQL",
+        })
+
+    dados_nao_migrados.insert_many(docs_arquivo)
+    dados_sensores.delete_many({"_id": {"$in": ids}})
+
 
 def enviar_lote(payload_ready):
     global ultimo_envio
@@ -360,6 +419,13 @@ def enviar_lote(payload_ready):
 
         if limite <= 0:
             break
+
+        fim_jogo = buscar_fim_jogo_pendente(simulacao_id)
+
+        if fim_jogo:
+            arquivar_sensores_nao_migrados(simulacao_id)
+            docs_para_enviar.append(fim_jogo)
+            continue
 
         docs = list(
             dados_sensores
@@ -386,7 +452,7 @@ def enviar_lote(payload_ready):
 
 def marcar_migrados(ids):
     dados_sensores.update_many(
-        {"_id": {"$in": [ObjectId(x) for x in ids]}},
+        {"_id": {"$in": ids}},
         {"$set": {"migrated": True}}
     )
 
