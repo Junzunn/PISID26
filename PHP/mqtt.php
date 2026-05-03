@@ -8,33 +8,54 @@ use PhpMqtt\Client\MqttClient;
 
 function publicar_inicio_simulacao(array $payload): void
 {
-    $clientId = 'marsabirinto-php-' . bin2hex(random_bytes(4));
+    $message = json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+    $ultimoErro = null;
 
-    $mqtt = new MqttClient(
-        MQTT_BROKER,
-        MQTT_PORT,
-        $clientId,
-        MqttClient::MQTT_3_1
-    );
+    for ($tentativa = 1; $tentativa <= 5; $tentativa++) {
+        $clientId = 'marsabirinto-php-' . bin2hex(random_bytes(8));
 
-    $connected = false;
-
-    try {
-        $mqtt->connect(null, true);
-        $connected = true;
-
-        $message = json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
-
-        $mqtt->publish(
-            MQTT_TOPIC,
-            $message,
-            MqttClient::QOS_AT_LEAST_ONCE
+        $mqtt = new MqttClient(
+            MQTT_BROKER,
+            MQTT_PORT,
+            $clientId,
+            MqttClient::MQTT_3_1_1
         );
 
-        $mqtt->loop(true, true);
-    } finally {
-        if ($connected) {
-            $mqtt->disconnect();
+        $connected = false;
+
+        try {
+            $mqtt->connect(null, true);
+            $connected = true;
+
+            $mqtt->publish(
+                MQTT_TOPIC,
+                $message,
+                MqttClient::QOS_AT_LEAST_ONCE
+            );
+
+            $mqtt->loop(true, true);
+            return;
+
+        } catch (Throwable $e) {
+            $ultimoErro = $e;
+
+            if ($tentativa < 5) {
+                usleep($tentativa * 500000);
+                continue;
+            }
+
+        } finally {
+            if ($connected) {
+                try {
+                    $mqtt->disconnect();
+                } catch (Throwable) {
+                }
+            }
         }
     }
+
+    throw new RuntimeException(
+        'Falha ao enviar mensagem MQTT Start apos 5 tentativas: ' .
+        ($ultimoErro ? $ultimoErro->getMessage() : 'erro desconhecido')
+    );
 }

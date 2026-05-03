@@ -33,7 +33,7 @@ mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
 def publicar(payload):
     msg = json.dumps(payload, ensure_ascii=False)
     mqtt_client.publish(TOPICO_PC1_PC2, msg, qos=1).wait_for_publish()
-    print(f"[MQTT OUT] {msg}")
+    #print(f"[MQTT OUT] {msg}")
 
 
 def ready_loop():
@@ -90,7 +90,7 @@ def migrar(conn, cur, doc):
                 seq,
                 h,
                 "1",
-                float(valor),
+                valor,
                 "Temperatura",
                 "Alerta de temperatura",
             ])
@@ -105,7 +105,7 @@ def migrar(conn, cur, doc):
                 seq,
                 h,
                 "2",
-                float(valor),
+                valor,
                 "Som",
                 "Alerta de som",
             ])
