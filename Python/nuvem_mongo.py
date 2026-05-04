@@ -94,7 +94,7 @@ def carregar_dados_maze():
     conn.close()
 
     print(f"[Maze DB] setupmaze: {setupmaze}")
-    print(f"[Maze DB] corredores ativos: {len(corredores)}")
+    print(f"[Maze DB] corredores ativos: {corredores}")
 
 
 def ligar_mongo():
@@ -190,16 +190,18 @@ def validar_mensagem(tipo, payload, received_at, equipa):
 
         if temperatura is None:
             erros.append("Temperature invalido")
-        elif temperatura < 0:
-            erros.append("temperatura negativa")
+        elif temperatura < float(setupmaze["normaltemperature"]) - float(setupmaze["temperaturevarlowtoleration"]):
+            erros.append("Valor de temperatura inferior ao valor minimo permitido")
 
     elif tipo == "som":
         som = to_float(payload.get("Sound"))
 
         if som is None:
-            erros.append("Sound invalido")
+            erros.append("Som invalido")
         elif som < 0:
             erros.append("som negativo")
+        elif som < float(setupmaze["normalsound"] - float(setupmaze["noisevartoleration"])):
+            erros.append("Valor de som inferior ao valor minimo permitido")
 
     elif tipo == "movimento":
         marsami = to_int(payload.get("Marsami"))
@@ -468,9 +470,9 @@ def on_message(client, userdata, msg):
 
 def main():
     print("[nuvem_mongo] start")
-    print(f"[nuvem_mongo] base dir: {BASE_DIR}")
-    print(f"[nuvem_mongo] mazerun: {MAZERUN_PATH}")
-    print(f"[nuvem_mongo] log dir: {LOG_DIR}")
+    #print(f"[nuvem_mongo] base dir: {BASE_DIR}")
+    #print(f"[nuvem_mongo] mazerun: {MAZERUN_PATH}")
+    #print(f"[nuvem_mongo] log dir: {LOG_DIR}")
 
     carregar_dados_maze()
     ligar_mongo()
