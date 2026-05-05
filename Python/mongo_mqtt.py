@@ -358,6 +358,9 @@ def worker(simulacao_id):
         elif doc["tipo"] == "movimento":
             tratar_movimento(doc)
 
+        elif doc["tipo"] == "fim_jogo":
+            pass
+
         dados_sensores.update_one(
             {"_id": doc["_id"]},
             {"$set": {"checked": True, "alerta": bool(alerta)}}
@@ -420,53 +423,6 @@ def serializar(doc):
         "alerta": doc["alerta"],
     }
 
-def buscar_fim_jogo_pendente(simulacao_id):
-    return dados_sensores.find_one({
-        "simulacaoID": simulacao_id,
-        "tipo": "fim_jogo",
-        "checked": True,
-        "migrated": False,
-    })
-
-
-def arquivar_sensores_nao_migrados(simulacao_id):
-    docs = list(dados_sensores.find({
-        "simulacaoID": simulacao_id,
-        "tipo": {"$ne": "fim_jogo"},
-        "migrated": False,
-    }))
-
-    if not docs:
-        return
-
-    agora = datetime.now()
-
-    docs_arquivo = []
-    ids = []
-
-    for doc in docs:
-        ids.append(doc["_id"])
-
-        docs_arquivo.append({
-            "simulacaoID": doc["simulacaoID"],
-            "tipo": doc["tipo"],
-            "payload": {
-                "origem": "dados_sensores",
-                "mongo_id_original": str(doc["_id"]),
-                "seq": doc.get("seq"),
-                "payload_original": doc.get("payload"),
-                "received_at_original": doc.get("received_at"),
-                "checked": doc.get("checked"),
-                "migrated": doc.get("migrated"),
-                "alerta": doc.get("alerta"),
-            },
-            "received_at": agora,
-            "categoria": "Jogo acabou antes de migrar para MySQL",
-        })
-
-    dados_nao_migrados.insert_many(docs_arquivo)
-    dados_sensores.delete_many({"_id": {"$in": ids}})
-
 
 def enviar_lote(payload_ready):
     global ultimo_envio
@@ -490,13 +446,6 @@ def enviar_lote(payload_ready):
         if limite <= 0:
             break
 
-        fim_jogo = buscar_fim_jogo_pendente(simulacao_id)
-
-        if fim_jogo:
-            arquivar_sensores_nao_migrados(simulacao_id)
-            docs_para_enviar.append(fim_jogo)
-            continue
-
         docs = list(
             dados_sensores
             .find({
@@ -507,7 +456,6 @@ def enviar_lote(payload_ready):
             .sort("seq", 1)
             .limit(limite)
         )
-
         docs_para_enviar.extend(docs)
 
     if docs_para_enviar:
@@ -518,7 +466,6 @@ def enviar_lote(payload_ready):
         })
 
     ultimo_envio = time.time()
-
 
 def marcar_migrados(ids):
     dados_sensores.update_many(
@@ -578,7 +525,6 @@ def main():
     while True:
         distribuir_docs()
         time.sleep(0.1)
-
 
 if __name__ == "__main__":
     main()

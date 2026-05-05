@@ -366,7 +366,7 @@ def guardar_fim_jogo(equipa):
         },
         "received_at": datetime.now(),
         "alerta": False,
-        "checked": True,
+        "checked": False,
         "migrated": False,
     }
 
