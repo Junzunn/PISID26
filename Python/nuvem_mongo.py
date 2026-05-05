@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 from queue import Queue, Empty
 
@@ -247,8 +248,55 @@ def validar_mensagem(tipo, payload, received_at, equipa):
 
 
 def detetar_outlier(tipo, payload, equipa):
-    # TODO: substituir pela funcao de outliers do colega.
-    return False
+    if tipo not in ("temperatura", "som"):
+        return False
+
+    campo = "Temperature" if tipo == "temperatura" else "Sound"
+    valor = to_float(payload.get(campo))
+
+    if valor is None:
+        return False
+
+    params = parametros_por_equipa.get(equipa, {})
+
+    janela = to_int(params.get("janela_outliers"))
+    if janela is None or janela < 1:
+        janela = 1
+
+    variacao = to_float(params.get("variacao_outlier"))
+    if variacao is None or variacao < 0:
+        return False
+
+    if variacao > 1:
+        variacao = variacao / 100
+
+    estado = simulacao_ativa_por_equipa[equipa]
+    historico = estado["historico_outliers"][tipo]
+
+    if not historico:
+        historico.append(valor)
+        return False
+
+    if janela == 1:
+        referencia = historico[-1]
+    else:
+        if len(historico) < janela:
+            historico.append(valor)
+            return False
+
+        referencia = sum(historico) / len(historico)
+
+    if referencia == 0:
+        outlier = abs(valor - referencia) > variacao
+    else:
+        outlier = abs(valor - referencia) / abs(referencia) > variacao
+
+    if not outlier:
+        historico.append(valor)
+    else:
+        print(f"[outlier] equipa={equipa} tipo={tipo} valor={valor} referencia={referencia}")
+
+    return outlier
 
 
 def proximo_seq(equipa):
@@ -418,9 +466,18 @@ def tratar_start_php(client, payload):
 
         filas_por_equipa[equipa] = Queue()
         parametros_por_equipa[equipa] = payload
+        janela = to_int(payload.get("janela_outliers"))
+        if janela is None or janela < 1:
+            janela = 1
+
         simulacao_ativa_por_equipa[equipa] = {
             "IDSimulacao": id_simulacao,
             "Equipa": equipa,
+            "janela_outliers": janela,
+            "historico_outliers": {
+                "temperatura": deque(maxlen=janela),
+                "som": deque(maxlen=janela),
+            },
         }
         seq_por_equipa[equipa] = 0
 

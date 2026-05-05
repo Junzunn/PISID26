@@ -133,8 +133,74 @@ def registar_atuador(simulacao_id, equipa, tipo, comando, origem):
 
 
 def detectar_alerta(tipo, valor, simulacao_id):
-    # TODO: substituir pela função do colega.
-    return False
+    if tipo not in ("temperatura", "som"):
+        return False
+
+    estado = estados[simulacao_id]
+    params = parametros.get(simulacao_id, {})
+    agora = time.time()
+
+    if tipo == "temperatura":
+        normal = float(setupmaze["normaltemperature"])
+        tolerancia = float(setupmaze["temperaturevarhightoleration"])
+
+        tempo_max = float(params.get("tempo_max_temp", 20))
+        tempo_min = float(params.get("tempo_min_temp", 2))
+        threshold = float(params.get("threshold_temp", 0.25))
+
+    else:
+        normal = float(setupmaze["normalnoise"])
+        tolerancia = float(setupmaze["noisevartoleration"])
+
+        tempo_max = float(params.get("tempo_max_ruido", 20))
+        tempo_min = float(params.get("tempo_min_ruido", 2))
+        threshold = float(params.get("threshold_ruido", 0.25))
+
+    if tempo_min > tempo_max:
+        tempo_min, tempo_max = tempo_max, tempo_min
+
+    if threshold > 1:
+        threshold = threshold / 100
+
+    if threshold < 0:
+        threshold = 0
+
+    if valor <= normal:
+        estado["prox_alerta"][tipo] = 0.0
+        return False
+
+    if tolerancia <= 0:
+        risco = 1.0
+    else:
+        risco = (valor - normal) / tolerancia
+
+    if risco < threshold:
+        estado["prox_alerta"][tipo] = 0.0
+        return False
+
+    if agora < estado["prox_alerta"][tipo]:
+        return False
+
+    if risco >= 1 or threshold >= 1:
+        tempo_espera = tempo_min
+    else:
+        progresso = (risco - threshold) / (1 - threshold)
+        tempo_espera = tempo_max - progresso * (tempo_max - tempo_min)
+
+        if tempo_espera < tempo_min:
+            tempo_espera = tempo_min
+
+        if tempo_espera > tempo_max:
+            tempo_espera = tempo_max
+
+    estado["prox_alerta"][tipo] = agora + tempo_espera
+
+    print(
+        f"[alerta] simulacaoID={simulacao_id} tipo={tipo} "
+        f"valor={valor} risco={risco:.2f} espera={tempo_espera:.1f}s"
+    )
+
+    return True
 
 
 def criar_estado(simulacao_id):
@@ -143,6 +209,10 @@ def criar_estado(simulacao_id):
         "score": {},
         "ac_ligado": False,
         "portas_fechadas": set(),
+        "prox_alerta": {
+            "temperatura": 0.0,
+            "som": 0.0,
+        },
     }
 
 
