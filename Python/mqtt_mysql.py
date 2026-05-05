@@ -15,7 +15,7 @@ TOPICO_PC1_PC2 = "PC1_PC2"
 CLIENT_ID = f"mqtt-mysql-{uuid.uuid4().hex[:8]}"
 
 MYSQL = {
-    "host": "192.168.1.227",
+    "host": "localhost",
     "user": "software@pisid.pt",
     "password": "softwarepisid",
     "database": "Marsabirinto",

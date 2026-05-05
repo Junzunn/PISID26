@@ -190,8 +190,11 @@ def validar_mensagem(tipo, payload, received_at, equipa):
 
         if temperatura is None:
             erros.append("Temperature invalido")
-        elif temperatura < float(setupmaze["normaltemperature"]) - float(setupmaze["temperaturevarlowtoleration"]):
-            erros.append("Valor de temperatura inferior ao valor minimo permitido")
+        else:
+            limite_min_temp = (float(setupmaze["normaltemperature"]) - float(setupmaze["temperaturevarlowtoleration"]))
+            if temperatura < limite_min_temp:
+                erros.append("Valor de temperatura inferior ao valor minimo permitido")
+
 
     elif tipo == "som":
         som = to_float(payload.get("Sound"))
@@ -200,8 +203,10 @@ def validar_mensagem(tipo, payload, received_at, equipa):
             erros.append("Som invalido")
         elif som < 0:
             erros.append("som negativo")
-        elif som < float(setupmaze["normalsound"] - float(setupmaze["noisevartoleration"])):
-            erros.append("Valor de som inferior ao valor minimo permitido")
+        else:
+            limite_min_som = (float(setupmaze["normalnoise"]) - float(setupmaze["noisevartoleration"]))
+            if som < limite_min_som:
+                erros.append("Valor de som inferior ao valor minimo permitido")
 
     elif tipo == "movimento":
         marsami = to_int(payload.get("Marsami"))

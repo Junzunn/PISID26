@@ -4,14 +4,14 @@ import paho.mqtt.client as mqtt
 
 BROKER = "broker.emqx.io"
 PORT = 1883
-TOPIC = "PISID"
+TOPIC = "msgPHP"
 client = mqtt.Client(client_id="pc1_sender", protocol=mqtt.MQTTv311)
 
 client.connect(BROKER, PORT, keepalive=60)
 client.loop_start()
 
 for i in range(1, 68):
-    msg = f"Number {i}"
+    msg = i
     info = client.publish(TOPIC, payload=msg, qos=1)
     info.wait_for_publish()
     now = time.strftime("%H:%M:%S", time.localtime())
