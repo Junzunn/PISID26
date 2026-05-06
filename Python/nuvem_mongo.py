@@ -251,8 +251,19 @@ def detetar_outlier(tipo, payload, equipa):
     if tipo not in ("temperatura", "som"):
         return False
 
-    campo = "Temperature" if tipo == "temperatura" else "Sound"
-    valor = to_float(payload.get(campo))
+    if tipo == "temperatura":
+        campo = "Temperature"
+        valor = to_float(payload.get(campo))
+
+        normal = to_float(setupmaze.get("normaltemperature"))
+        tolerancia_inicial = to_float(setupmaze.get("temperaturevarhightoleration"))
+
+    else:
+        campo = "Sound"
+        valor = to_float(payload.get(campo))
+
+        normal = to_float(setupmaze.get("normalnoise"))
+        tolerancia_inicial = to_float(setupmaze.get("noisevartoleration"))
 
     if valor is None:
         return False
@@ -273,17 +284,28 @@ def detetar_outlier(tipo, payload, equipa):
     estado = simulacao_ativa_por_equipa[equipa]
     historico = estado["historico_outliers"][tipo]
 
+    # Primeira leitura deste tipo nesta equipa/simulação.
+    # Só aqui usamos normal + tolerância como limite superior inicial.
     if not historico:
+        if normal is not None and tolerancia_inicial is not None:
+            limite_inicial = normal + tolerancia_inicial
+
+            if valor > limite_inicial:
+                print(
+                    f"[outlier inicial] equipa={equipa} tipo={tipo} "
+                    f"valor={valor} limite={limite_inicial}"
+                )
+                return True
+
         historico.append(valor)
         return False
 
+    # Depois da primeira leitura, já não usamos limite fixo máximo.
+    # A comparação passa a ser feita contra a última leitura aceite
+    # ou contra a média das leituras recentes.
     if janela == 1:
         referencia = historico[-1]
     else:
-        if len(historico) < janela:
-            historico.append(valor)
-            return False
-
         referencia = sum(historico) / len(historico)
 
     if referencia == 0:
@@ -291,12 +313,13 @@ def detetar_outlier(tipo, payload, equipa):
     else:
         outlier = abs(valor - referencia) / abs(referencia) > variacao
 
-    if not outlier:
-        historico.append(valor)
-    else:
-        print(f"[outlier] equipa={equipa} tipo={tipo} valor={valor} referencia={referencia}")
+    if outlier:
+        print(f"[outlier] equipa={equipa} tipo={tipo} "
+              f"valor={valor} referencia={referencia}")
+        return True
 
-    return outlier
+    historico.append(valor)
+    return False
 
 
 def proximo_seq(equipa):
