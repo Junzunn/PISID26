@@ -98,8 +98,8 @@ def comando_porta(tipo, equipa, origem, destino):
     return f"{{Type: {tipo}, Player:{equipa}, RoomOrigin: {origem}, RoomDestiny: {destino}}}"
 
 
-def comando_close_all_door(equipa):
-    return f"{{Type: CloseAllDoor, Player:{equipa}}}"
+def comando_all_door(tipo, equipa):
+    return f"{{Type: {tipo}, Player:{equipa}}}"
 
 
 def comando_ac(tipo, equipa):
@@ -168,12 +168,11 @@ def calcular_tempo_alerta(tipo, valor, simulacao_id):
 
 
 def calcular_tempo_fecho_ruido(valor, simulacao_id):
-    _, _, tempo_min, tempo_max, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
+    _, _, tempo_min, tempo_max, _ = normal_tolerancia_tempos_threshold("som", simulacao_id)
     risco = calcular_risco("som", valor, simulacao_id)
-    if risco >= 1 or threshold >= 1:
-        return tempo_max
-    progresso = (risco - threshold) / (1 - threshold)
-    return max(tempo_min, min(tempo_max, tempo_min + progresso * (tempo_max - tempo_min)))
+    risco = max(0.0, min(1.0, risco))
+
+    return tempo_min + risco * (tempo_max - tempo_min)
 
 
 def detectar_alerta(tipo, valor, simulacao_id):
@@ -185,7 +184,8 @@ def detectar_alerta(tipo, valor, simulacao_id):
         estado["prox_alerta"][tipo] = 0.0
         return False
     if agora < estado["prox_alerta"][tipo]:
-        return False
+        if not (tipo == "som" and risco >= 1):
+            return False
     tempo_espera = calcular_tempo_alerta(tipo, valor, simulacao_id)
     estado["prox_alerta"][tipo] = agora + tempo_espera
     print(f"[alerta] simulacaoID={simulacao_id} tipo={tipo} valor={valor} risco={risco:.2f} espera={tempo_espera:.1f}s")
@@ -233,11 +233,24 @@ def controlar_portas_score(simulacao_id, equipa, sala, payload, fechar):
 
 def abrir_portas_sem_score(simulacao_id, equipa, payload):
     estado = estados[simulacao_id]
-    for origem, destinos in saidas_por_sala.items():
-        for destino in destinos:
-            if (origem, destino) not in estado["portas_score_fechadas"]:
-                registar_atuador(simulacao_id, equipa, "porta_ruido_global", comando_porta("OpenDoor", equipa, origem, destino), payload)
+
+    registar_atuador(
+        simulacao_id,
+        equipa,
+        "porta_ruido_global",
+        comando_all_door("OpenAllDoor", equipa),
+        payload,
+    )
     estado["ruido_global_fechado"] = False
+
+    for origem, destino in sorted(estado["portas_score_fechadas"]):
+        registar_atuador(
+            simulacao_id,
+            equipa,
+            "porta_score",
+            comando_porta("CloseDoor", equipa, origem, destino),
+            payload,
+        )
 
 
 def tentar_score_sala(simulacao_id, equipa, sala, payload):
@@ -281,18 +294,42 @@ def tratar_som(doc):
     payload = doc["payload"]
     estado = estados[simulacao_id]
     equipa = get_equipa(simulacao_id)
+
     valor = float(payload["Sound"])
     agora = time.time()
+
     tem_alerta = detectar_alerta("som", valor, simulacao_id)
+
+    normalnoise = float(setupmaze["normalnoise"])
+    risco = calcular_risco("som", valor, simulacao_id)
+    _, _, tempo_min_ruido, tempo_max_ruido, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
+
     if tem_alerta and not estado["ruido_global_fechado"]:
-        registar_atuador(simulacao_id, equipa, "porta_ruido_global", comando_close_all_door(equipa), payload)
+        registar_atuador(
+            simulacao_id,
+            equipa,
+            "porta_ruido_global",
+            comando_all_door("CloseAllDoor", equipa),
+            payload
+        )
+
         estado["ruido_global_fechado"] = True
         estado["proxima_atuacao_ruido"] = agora + calcular_tempo_fecho_ruido(valor, simulacao_id)
+
         tentar_score_todas_salas(simulacao_id, payload)
-    elif estado["ruido_global_fechado"] and agora >= estado["proxima_atuacao_ruido"]:
-        abrir_portas_sem_score(simulacao_id, equipa, payload)
-        estado["proxima_atuacao_ruido"] = agora + normal_tolerancia_tempos_threshold("som", simulacao_id)[2]
-        estado["prox_alerta"]["som"] = 0.0
+
+    elif estado["ruido_global_fechado"]:
+        pode_abrir_por_normal = valor <= normalnoise
+        pode_abrir_por_tempo = agora >= estado["proxima_atuacao_ruido"] and risco < threshold
+
+        if pode_abrir_por_normal or pode_abrir_por_tempo:
+            abrir_portas_sem_score(simulacao_id, equipa, payload)
+
+            estado["proxima_atuacao_ruido"] = agora + tempo_min_ruido
+
+            janela_movimento = tempo_min_ruido + threshold * (tempo_max_ruido - tempo_min_ruido)
+            estado["prox_alerta"]["som"] = agora + janela_movimento
+
     return tem_alerta
 
 
@@ -356,7 +393,7 @@ def reconstruir_atuadores(simulacao_id):
         elif tipo_acao == "porta_ruido_global":
             if "CloseAllDoor" in comando:
                 estado["ruido_global_fechado"] = True
-            elif "OpenDoor" in comando:
+            elif "OpenAllDoor" in comando or "OpenDoor" in comando:
                 estado["ruido_global_fechado"] = False
         elif tipo_acao == "porta_score":
             porta = porta_do_comando(comando)

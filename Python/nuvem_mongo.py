@@ -17,13 +17,7 @@ from pymongo.errors import PyMongoError, ServerSelectionTimeoutError, AutoReconn
 MQTT_BROKER = "broker.emqx.io"
 MQTT_PORT = 1883
 TOPICO_PHP = "msgPHP"
-
-TOPICOS_SENSORES_BASE = [
-    "pisid_mazemov",
-    "pisid_mazetemp",
-    "pisid_mazesound",
-]
-
+TOPICOS_SENSORES_BASE = ["pisid_mazemov", "pisid_mazetemp", "pisid_mazesound"]
 CLIENT_ID = f"nuvem-mongo-{uuid.uuid4().hex[:8]}"
 
 MAZE_DB_CONFIG = {
@@ -33,18 +27,16 @@ MAZE_DB_CONFIG = {
     "database": "maze",
 }
 
-MONGO_URI = ("mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/"
-            "?replicaSet=rs0"
-            "&retryWrites=true"
-            "&serverSelectionTimeoutMS=200"
-            "&connectTimeoutMS=1000")
+MONGO_URI = (
+    "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/"
+    "?replicaSet=rs0"
+    "&retryWrites=true"
+    "&serverSelectionTimeoutMS=200"
+    "&connectTimeoutMS=1000"
+)
 MONGO_DB = "Marsabirinto"
 
-if getattr(sys, "frozen", False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
+BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 MAZERUN_PATH = os.path.join(BASE_DIR, "mazerun")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 
@@ -69,11 +61,7 @@ dados_sensores = None
 dados_nao_migrados = None
 
 lock = threading.Lock()
-filas_por_equipa = {}
-threads_por_equipa = {}
-simulacao_ativa_por_equipa = {}
-parametros_por_equipa = {}
-seq_por_equipa = {}
+estados_por_equipa = {}
 
 
 def carregar_dados_maze():
@@ -86,10 +74,7 @@ def carregar_dados_maze():
     setupmaze = cursor.fetchone()
 
     cursor.execute("SELECT Rooma, Roomb FROM corridor WHERE active = 1")
-    corredores = {
-        (int(row["Rooma"]), int(row["Roomb"]))
-        for row in cursor.fetchall()
-    }
+    corredores = {(int(row["Rooma"]), int(row["Roomb"])) for row in cursor.fetchall()}
 
     cursor.close()
     conn.close()
@@ -106,21 +91,17 @@ def ligar_mongo():
         mongo_client.admin.command("ping")
     except ServerSelectionTimeoutError:
         raise RuntimeError("[Mongo ERRO] MongoDB sem servico ou replica set sem primary")
-    except PyMongoError as e:
-        raise RuntimeError(f"[Mongo ERRO] falha ao ligar ao MongoDB: {e}")
+    except PyMongoError as erro:
+        raise RuntimeError(f"[Mongo ERRO] falha ao ligar ao MongoDB: {erro}")
 
     db = mongo_client[MONGO_DB]
     dados_sensores = db["dados_sensores"]
     dados_nao_migrados = db["dados_naoMigrados"]
-
     print(f"[Mongo] ligado a {MONGO_DB}")
 
 
 def topicos_da_equipa(equipa):
-    return [
-        f"{base}_{equipa}"
-        for base in TOPICOS_SENSORES_BASE
-    ]
+    return [f"{base}_{equipa}" for base in TOPICOS_SENSORES_BASE]
 
 
 def subscrever_equipa(client, equipa):
@@ -134,26 +115,10 @@ def tipo_e_equipa_do_topico(topic):
 
     if "mazemov" in topic:
         return "movimento", equipa
-
     if "mazetemp" in topic:
         return "temperatura", equipa
-
     return "som", equipa
 
-
-def converter_hora(valor):
-    for formato in FORMATOS_HORA:
-        try:
-            return datetime.strptime(str(valor), formato)
-        except ValueError:
-            pass
-
-    return None
-
-
-def corrigir_hora_se_necessario(payload, received_at):
-    if "Hour" in payload and converter_hora(payload["Hour"]) is None:
-        payload["Hour"] = received_at.strftime("%Y-%m-%d %H:%M:%S")
 
 def to_int(valor):
     try:
@@ -168,19 +133,49 @@ def to_float(valor):
     except (TypeError, ValueError):
         return None
 
+
+def converter_hora(valor):
+    for formato in FORMATOS_HORA:
+        try:
+            return datetime.strptime(str(valor), formato)
+        except ValueError:
+            pass
+    return None
+
+
+def corrigir_hora_se_necessario(payload, received_at):
+    if "Hour" in payload and converter_hora(payload["Hour"]) is None:
+        payload["Hour"] = received_at.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def validar_posicao_marsami(equipa, marsami, origem, status):
+    if status != 1:
+        return None
+
+    sala_atual = estados_por_equipa[equipa]["sala_atual_marsami"].get(marsami)
+
+    if origem == 0:
+        return "largada inicial repetida para o mesmo marsami" if sala_atual is not None else None
+
+    if sala_atual is None:
+        return "marsami sem sala atual conhecida"
+
+    if sala_atual != origem:
+        return f"RoomOrigin nao corresponde a sala atual do marsami (atual={sala_atual}, origem={origem})"
+
+    return None
+
+
 def validar_mensagem(tipo, payload, received_at, equipa):
     erros = []
-
     campos_em_falta = CAMPOS_OBRIGATORIOS[tipo] - set(payload.keys())
+
     if campos_em_falta:
-        erros.append("campos em falta: " + ", ".join(sorted(campos_em_falta)))
-        return erros
+        return ["campos em falta: " + ", ".join(sorted(campos_em_falta))]
 
     player = to_int(payload.get("Player"))
     if player is None:
-        erros.append("Player invalido")
-        return erros
-
+        return ["Player invalido"]
     if player != equipa:
         erros.append("Player nao corresponde ao topico MQTT")
 
@@ -188,61 +183,68 @@ def validar_mensagem(tipo, payload, received_at, equipa):
 
     if tipo == "temperatura":
         temperatura = to_float(payload.get("Temperature"))
-
         if temperatura is None:
             erros.append("Temperature invalido")
-        else:
-            limite_min_temp = (float(setupmaze["normaltemperature"]) - float(setupmaze["temperaturevarlowtoleration"]))
-            if temperatura < limite_min_temp:
-                erros.append("Valor de temperatura inferior ao valor minimo permitido")
+        elif temperatura < float(setupmaze["normaltemperature"]) - float(setupmaze["temperaturevarlowtoleration"]):
+            erros.append("Valor de temperatura inferior ao valor minimo permitido")
+        return erros
 
-
-    elif tipo == "som":
+    if tipo == "som":
         som = to_float(payload.get("Sound"))
-
         if som is None:
             erros.append("Som invalido")
         elif som < 0:
             erros.append("som negativo")
-        else:
-            limite_min_som = (float(setupmaze["normalnoise"]) - float(setupmaze["noisevartoleration"]))
-            if som < limite_min_som:
-                erros.append("Valor de som inferior ao valor minimo permitido")
+        elif som < float(setupmaze["normalnoise"]) - float(setupmaze["noisevartoleration"]):
+            erros.append("Valor de som inferior ao valor minimo permitido")
+        return erros
 
-    elif tipo == "movimento":
-        marsami = to_int(payload.get("Marsami"))
-        origem = to_int(payload.get("RoomOrigin"))
-        destino = to_int(payload.get("RoomDestiny"))
-        status = to_int(payload.get("Status"))
+    marsami = to_int(payload.get("Marsami"))
+    origem = to_int(payload.get("RoomOrigin"))
+    destino = to_int(payload.get("RoomDestiny"))
+    status = to_int(payload.get("Status"))
 
-        if marsami is None:
-            erros.append("Marsami invalido")
-        elif marsami < 0:
-            erros.append("marsami negativo")
+    numero_marsamis = int(setupmaze["numbermarsamis"])
+    numero_salas = int(setupmaze["numberrooms"])
 
-        if origem is None:
-            erros.append("RoomOrigin invalido")
-        elif origem < 0:
-            erros.append("sala origem negativa")
+    if marsami is None or marsami < 1 or marsami > numero_marsamis:
+        erros.append("Marsami invalido")
+    if origem is None or origem < 0 or origem > numero_salas:
+        erros.append("RoomOrigin invalido")
+    if destino is None or destino < 0 or destino > numero_salas:
+        erros.append("RoomDestiny invalido")
+    if status is None or status not in (0, 1, 2):
+        erros.append("Status invalido")
 
-        if destino is None:
-            erros.append("RoomDestiny invalido")
-        elif destino < 0:
-            erros.append("sala destino negativa")
+    if erros:
+        return erros
 
-        if status is None or status not in (0, 1, 2):
-            erros.append("Status invalido")
+    if status == 1 and destino == 0:
+        erros.append("RoomDestiny 0 invalido para movimento normal")
 
-        if (status is not None
-            and origem is not None
-            and destino is not None
-            and status != 2
-            and origem != 0
-            and destino != 0
-            and (origem, destino) not in corredores):
-                erros.append("movimento nao corresponde a corredor ativo")
+    if status == 2 and (origem != 0 or destino != 0):
+        erros.append("Status 2 deve usar RoomOrigin 0 e RoomDestiny 0")
+
+    if status != 2 and origem != 0 and destino != 0 and (origem, destino) not in corredores:
+        erros.append("movimento nao corresponde a corredor ativo")
+
+    if not erros:
+        erro_posicao = validar_posicao_marsami(equipa, marsami, origem, status)
+        if erro_posicao:
+            erros.append(erro_posicao)
 
     return erros
+
+
+def atualizar_posicao_marsami(equipa, payload):
+    status = to_int(payload.get("Status"))
+    marsami = to_int(payload.get("Marsami"))
+    destino = to_int(payload.get("RoomDestiny"))
+
+    if status != 1 or marsami is None or destino is None:
+        return
+
+    estados_por_equipa[equipa]["sala_atual_marsami"][marsami] = destino
 
 
 def detetar_outlier(tipo, payload, equipa):
@@ -250,70 +252,39 @@ def detetar_outlier(tipo, payload, equipa):
         return False
 
     if tipo == "temperatura":
-        campo = "Temperature"
-        valor = to_float(payload.get(campo))
-
+        valor = to_float(payload.get("Temperature"))
         normal = to_float(setupmaze.get("normaltemperature"))
         tolerancia_inicial = to_float(setupmaze.get("temperaturevarhightoleration"))
-
     else:
-        campo = "Sound"
-        valor = to_float(payload.get(campo))
-
+        valor = to_float(payload.get("Sound"))
         normal = to_float(setupmaze.get("normalnoise"))
         tolerancia_inicial = to_float(setupmaze.get("noisevartoleration"))
 
     if valor is None:
         return False
 
-    params = parametros_por_equipa.get(equipa, {})
+    estado = estados_por_equipa[equipa]
+    variacao = to_float(estado["params"].get("variacao_outlier"))
 
-    janela = to_int(params.get("janela_outliers"))
-    if janela is None or janela < 1:
-        janela = 1
-
-    variacao = to_float(params.get("variacao_outlier"))
     if variacao is None or variacao < 0:
         return False
-
     if variacao > 1:
         variacao = variacao / 100
 
-    estado = simulacao_ativa_por_equipa[equipa]
     historico = estado["historico_outliers"][tipo]
 
-    # Primeira leitura deste tipo nesta equipa/simulação.
-    # Só aqui usamos normal + tolerância como limite superior inicial.
     if not historico:
-        if normal is not None and tolerancia_inicial is not None:
-            limite_inicial = normal + tolerancia_inicial
-
-            if valor > limite_inicial:
-                print(
-                    f"[outlier inicial] equipa={equipa} tipo={tipo} "
-                    f"valor={valor} limite={limite_inicial}"
-                )
-                return True
-
+        if normal is not None and tolerancia_inicial is not None and valor > normal + tolerancia_inicial:
+            print(f"[outlier inicial] equipa={equipa} tipo={tipo} valor={valor} limite={normal + tolerancia_inicial}")
+            return True
         historico.append(valor)
         return False
 
-    # Depois da primeira leitura, já não usamos limite fixo máximo.
-    # A comparação passa a ser feita contra a última leitura aceite
-    # ou contra a média das leituras recentes.
-    if janela == 1:
-        referencia = historico[-1]
-    else:
-        referencia = sum(historico) / len(historico)
-
-    if referencia == 0:
-        outlier = abs(valor - referencia) > variacao
-    else:
-        outlier = abs(valor - referencia) / abs(referencia) > variacao
+    referencia = historico[-1] if len(historico) == 1 else sum(historico) / len(historico)
+    outlier = abs(valor - referencia) > variacao if referencia == 0 else abs(valor - referencia) / abs(referencia) > variacao
 
     if outlier:
-        print(f"[outlier] equipa={equipa} tipo={tipo} "
-              f"valor={valor} referencia={referencia}")
+        print(f"[outlier] equipa={equipa} tipo={tipo} valor={valor} referencia={referencia}")
         return True
 
     historico.append(valor)
@@ -321,8 +292,9 @@ def detetar_outlier(tipo, payload, equipa):
 
 
 def proximo_seq(equipa):
-    seq_por_equipa[equipa] += 1
-    return seq_por_equipa[equipa]
+    estados_por_equipa[equipa]["seq"] += 1
+    return estados_por_equipa[equipa]["seq"]
+
 
 def insert_com_retry(collection, doc):
     while True:
@@ -331,20 +303,21 @@ def insert_com_retry(collection, doc):
             return
         except DuplicateKeyError:
             return
-        except ServerSelectionTimeoutError as e:
-            print(f"[Mongo retry] replica set sem primary: {e}")
+        except ServerSelectionTimeoutError as erro:
+            print(f"[Mongo retry] replica set sem primary: {erro}")
             time.sleep(1)
-        except AutoReconnect as e:
-            print(f"[Mongo retry] a aguardar primary: {e}")
+        except AutoReconnect as erro:
+            print(f"[Mongo retry] a aguardar primary: {erro}")
             time.sleep(1)
+
 
 def guardar_mensagem_valida(equipa, tipo, payload, received_at):
-    id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
+    estado = estados_por_equipa[equipa]
     seq = proximo_seq(equipa)
 
-    doc = {
-        "_id": f"{id_simulacao}:{seq}",
-        "simulacaoID": id_simulacao,
+    insert_com_retry(dados_sensores, {
+        "_id": f"{estado['IDSimulacao']}:{seq}",
+        "simulacaoID": estado["IDSimulacao"],
         "seq": seq,
         "tipo": tipo,
         "payload": payload,
@@ -352,47 +325,42 @@ def guardar_mensagem_valida(equipa, tipo, payload, received_at):
         "alerta": False,
         "checked": False,
         "migrated": False,
-    }
+    })
 
-    insert_com_retry(dados_sensores, doc)
-    print(f"[dados_sensores] simulacaoID={id_simulacao} seq={seq} tipo={tipo}")
+    print(f"[dados_sensores] simulacaoID={estado['IDSimulacao']} seq={seq} tipo={tipo}")
 
 
 def guardar_mensagem_invalida(equipa, tipo, payload, received_at, categoria):
-    id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
+    estado = estados_por_equipa[equipa]
 
-    doc = {
-        "simulacaoID": id_simulacao,
+    insert_com_retry(dados_nao_migrados, {
+        "simulacaoID": estado["IDSimulacao"],
         "tipo": tipo,
         "payload": payload,
         "received_at": received_at,
         "categoria": categoria,
-    }
+    })
 
-    insert_com_retry(dados_nao_migrados, doc)
-    print(f"[dados_naoMigrados] simulacaoID={id_simulacao} tipo={tipo} categoria={categoria}")
+    print(f"[dados_naoMigrados] simulacaoID={estado['IDSimulacao']} tipo={tipo} categoria={categoria}")
 
 
 def guardar_fim_jogo(equipa):
-    id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
+    estado = estados_por_equipa[equipa]
     seq = proximo_seq(equipa)
 
-    doc = {
-        "_id": f"{id_simulacao}:{seq}",
-        "simulacaoID": id_simulacao,
+    insert_com_retry(dados_sensores, {
+        "_id": f"{estado['IDSimulacao']}:{seq}",
+        "simulacaoID": estado["IDSimulacao"],
         "seq": seq,
         "tipo": "fim_jogo",
-        "payload": {
-            "Equipa": equipa,
-        },
+        "payload": {"Equipa": equipa},
         "received_at": datetime.now(),
         "alerta": False,
         "checked": False,
         "migrated": False,
-    }
+    })
 
-    insert_com_retry(dados_sensores, doc)
-    print(f"[fim_jogo] simulacaoID={id_simulacao} seq={seq}")
+    print(f"[fim_jogo] simulacaoID={estado['IDSimulacao']} seq={seq}")
 
 
 def processar_mensagem(equipa, mensagem):
@@ -402,22 +370,23 @@ def processar_mensagem(equipa, mensagem):
 
     erros = validar_mensagem(tipo, payload, received_at, equipa)
     if erros:
-        categoria = "invalido: " + "; ".join(erros)
-        guardar_mensagem_invalida(equipa, tipo, payload, received_at, categoria)
+        guardar_mensagem_invalida(equipa, tipo, payload, received_at, "invalido: " + "; ".join(erros))
         return
 
-    outlier = detetar_outlier(tipo, payload, equipa)
-    if outlier:
-        categoria = "outlier"
-        guardar_mensagem_invalida(equipa, tipo, payload, received_at, categoria)
+    if detetar_outlier(tipo, payload, equipa):
+        guardar_mensagem_invalida(equipa, tipo, payload, received_at, "outlier")
         return
 
     guardar_mensagem_valida(equipa, tipo, payload, received_at)
 
+    if tipo == "movimento":
+        atualizar_posicao_marsami(equipa, payload)
+
 
 def worker_equipa(client, equipa):
-    fila = filas_por_equipa[equipa]
-    id_simulacao = simulacao_ativa_por_equipa[equipa]["IDSimulacao"]
+    estado = estados_por_equipa[equipa]
+    fila = estado["fila"]
+    id_simulacao = estado["IDSimulacao"]
 
     subscrever_equipa(client, equipa)
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -447,7 +416,6 @@ def worker_equipa(client, equipa):
         while True:
             if not processo_terminou and processo.poll() is not None:
                 processo_terminou = True
-
                 log_file.write("\n==============================\n")
                 log_file.write(f"End: {datetime.now().isoformat()}\n")
                 log_file.write(f"Return code: {processo.returncode}\n")
@@ -463,19 +431,15 @@ def worker_equipa(client, equipa):
 
             try:
                 processar_mensagem(equipa, mensagem)
-            except Exception as e:
-                print(f"[erro mensagem] equipa={equipa}: {type(e).__name__}: {e}")
+            except Exception as erro:
+                print(f"[erro mensagem] equipa={equipa}: {type(erro).__name__}: {erro}")
             finally:
                 fila.task_done()
 
         guardar_fim_jogo(equipa)
 
     with lock:
-        filas_por_equipa.pop(equipa, None)
-        threads_por_equipa.pop(equipa, None)
-        simulacao_ativa_por_equipa.pop(equipa, None)
-        parametros_por_equipa.pop(equipa, None)
-        seq_por_equipa.pop(equipa, None)
+        estados_por_equipa.pop(equipa, None)
 
     print(f"[cleanup] nuvem_mongo equipa={equipa}, IDSimulacao={id_simulacao}")
 
@@ -485,26 +449,26 @@ def tratar_start_php(client, payload):
     equipa = int(payload["Equipa"])
 
     with lock:
-        if equipa in threads_por_equipa:
+        if equipa in estados_por_equipa:
             print(f"[Start ignorado] equipa={equipa} ja esta a correr")
             return
 
-        filas_por_equipa[equipa] = Queue()
-        parametros_por_equipa[equipa] = payload
         janela = to_int(payload.get("janela_outliers"))
         if janela is None or janela < 1:
             janela = 1
 
-        simulacao_ativa_por_equipa[equipa] = {
+        estados_por_equipa[equipa] = {
             "IDSimulacao": id_simulacao,
             "Equipa": equipa,
-            "janela_outliers": janela,
+            "params": payload,
+            "fila": Queue(),
+            "seq": 0,
             "historico_outliers": {
                 "temperatura": deque(maxlen=janela),
                 "som": deque(maxlen=janela),
             },
+            "sala_atual_marsami": {},
         }
-        seq_por_equipa[equipa] = 0
 
         thread = threading.Thread(
             target=worker_equipa,
@@ -512,8 +476,7 @@ def tratar_start_php(client, payload):
             daemon=True,
             name=f"worker_equipa_{equipa}",
         )
-
-        threads_por_equipa[equipa] = thread
+        estados_por_equipa[equipa]["thread"] = thread
         thread.start()
 
     print(f"[Start] equipa={equipa}, IDSimulacao={id_simulacao}")
@@ -522,12 +485,11 @@ def tratar_start_php(client, payload):
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     print(f"[MQTT] ligado a {MQTT_BROKER}:{MQTT_PORT}")
-
     client.subscribe(TOPICO_PHP, qos=1)
     print(f"[MQTT] subscrito: {TOPICO_PHP}")
 
     with lock:
-        equipas = list(filas_por_equipa.keys())
+        equipas = list(estados_por_equipa.keys())
 
     for equipa in equipas:
         subscrever_equipa(client, equipa)
@@ -536,12 +498,11 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 def on_message(client, userdata, msg):
     try:
         payload = json.loads(msg.payload.decode("utf-8"))
-    except Exception as e:
-        print(f"[MQTT ignorado] payload invalido: {e}")
+    except Exception as erro:
+        print(f"[MQTT ignorado] payload invalido: {erro}")
         return
 
     received_at = datetime.now()
-
     if msg.topic == TOPICO_PHP:
         if payload.get("type") == "Start":
             tratar_start_php(client, payload)
@@ -550,39 +511,28 @@ def on_message(client, userdata, msg):
     tipo, equipa = tipo_e_equipa_do_topico(msg.topic)
 
     with lock:
-        fila = filas_por_equipa.get(equipa)
+        estado = estados_por_equipa.get(equipa)
 
-    if fila is not None:
-        fila.put({
+    if estado is not None:
+        estado["fila"].put({
             "tipo": tipo,
             "payload": payload,
             "received_at": received_at,
         })
 
-
 def main():
     print("[nuvem_mongo] start")
-    #print(f"[nuvem_mongo] base dir: {BASE_DIR}")
-    #print(f"[nuvem_mongo] mazerun: {MAZERUN_PATH}")
-    #print(f"[nuvem_mongo] log dir: {LOG_DIR}")
-
     carregar_dados_maze()
     ligar_mongo()
 
-    client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2,
-        client_id=CLIENT_ID,
-    )
-
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
     client.on_connect = on_connect
     client.on_message = on_message
-
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
 
     print("[nuvem_mongo] a aguardar mensagens MQTT")
     client.loop_forever()
-
 
 if __name__ == "__main__":
     main()
