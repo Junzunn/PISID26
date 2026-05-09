@@ -316,8 +316,6 @@ def tratar_som(doc):
         estado["ruido_global_fechado"] = True
         estado["proxima_atuacao_ruido"] = agora + calcular_tempo_fecho_ruido(valor, simulacao_id)
 
-        tentar_score_todas_salas(simulacao_id, payload)
-
     elif estado["ruido_global_fechado"]:
         pode_abrir_por_normal = valor <= normalnoise
         pode_abrir_por_tempo = agora >= estado["proxima_atuacao_ruido"] and risco < threshold

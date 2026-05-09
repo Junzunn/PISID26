@@ -148,23 +148,6 @@ def corrigir_hora_se_necessario(payload, received_at):
         payload["Hour"] = received_at.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def validar_posicao_marsami(equipa, marsami, origem, status):
-    if status != 1:
-        return None
-
-    sala_atual = estados_por_equipa[equipa]["sala_atual_marsami"].get(marsami)
-
-    if origem == 0:
-        return "largada inicial repetida para o mesmo marsami" if sala_atual is not None else None
-
-    if sala_atual is None:
-        return "marsami sem sala atual conhecida"
-
-    if sala_atual != origem:
-        return f"RoomOrigin nao corresponde a sala atual do marsami (atual={sala_atual}, origem={origem})"
-
-    return None
-
 
 def validar_mensagem(tipo, payload, received_at, equipa):
     erros = []
@@ -228,23 +211,8 @@ def validar_mensagem(tipo, payload, received_at, equipa):
     if status != 2 and origem != 0 and destino != 0 and (origem, destino) not in corredores:
         erros.append("movimento nao corresponde a corredor ativo")
 
-    if not erros:
-        erro_posicao = validar_posicao_marsami(equipa, marsami, origem, status)
-        if erro_posicao:
-            erros.append(erro_posicao)
-
     return erros
 
-
-def atualizar_posicao_marsami(equipa, payload):
-    status = to_int(payload.get("Status"))
-    marsami = to_int(payload.get("Marsami"))
-    destino = to_int(payload.get("RoomDestiny"))
-
-    if status != 1 or marsami is None or destino is None:
-        return
-
-    estados_por_equipa[equipa]["sala_atual_marsami"][marsami] = destino
 
 
 def detetar_outlier(tipo, payload, equipa):
@@ -379,9 +347,6 @@ def processar_mensagem(equipa, mensagem):
 
     guardar_mensagem_valida(equipa, tipo, payload, received_at)
 
-    if tipo == "movimento":
-        atualizar_posicao_marsami(equipa, payload)
-
 
 def worker_equipa(client, equipa):
     estado = estados_por_equipa[equipa]
@@ -467,7 +432,6 @@ def tratar_start_php(client, payload):
                 "temperatura": deque(maxlen=janela),
                 "som": deque(maxlen=janela),
             },
-            "sala_atual_marsami": {},
         }
 
         thread = threading.Thread(
@@ -476,7 +440,6 @@ def tratar_start_php(client, payload):
             daemon=True,
             name=f"worker_equipa_{equipa}",
         )
-        estados_por_equipa[equipa]["thread"] = thread
         thread.start()
 
     print(f"[Start] equipa={equipa}, IDSimulacao={id_simulacao}")
@@ -503,6 +466,7 @@ def on_message(client, userdata, msg):
         return
 
     received_at = datetime.now()
+
     if msg.topic == TOPICO_PHP:
         if payload.get("type") == "Start":
             tratar_start_php(client, payload)
@@ -533,6 +497,7 @@ def main():
 
     print("[nuvem_mongo] a aguardar mensagens MQTT")
     client.loop_forever()
+
 
 if __name__ == "__main__":
     main()
