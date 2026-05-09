@@ -125,8 +125,9 @@ def insert_nao_migrado_com_retry(doc):
             print(f"[Mongo retry] dados_naoMigrados: {e}")
             time.sleep(1)
 
-def registar_atuador(simulacao_id, equipa, tipo_acao, comando, payload_origem):
-    publicar(TOPICO_ATUADOR, comando)
+def registar_atuador(simulacao_id, equipa, tipo_acao, comando, payload_origem, enviar=True):
+    if enviar:
+        publicar(TOPICO_ATUADOR, comando)
 
     insert_nao_migrado_com_retry({
         "simulacaoID": int(simulacao_id),
@@ -136,6 +137,7 @@ def registar_atuador(simulacao_id, equipa, tipo_acao, comando, payload_origem):
             "tipo_acao": tipo_acao,
             "comando": comando,
             "payload_origem": payload_origem,
+            "enviado": bool(enviar),
         },
         "received_at": datetime.now(),
         "categoria": "acao do atuador",
@@ -190,7 +192,7 @@ def detectar_alerta(tipo, valor, simulacao_id):
     _, _, tempo_min, tempo_max, threshold = normal_tolerancia_tempos_threshold(tipo, simulacao_id)
     risco = calcular_risco(tipo, valor, simulacao_id)
     agora = time.time()
-    if risco < threshold:
+    if risco <= 0 or risco < threshold:
         estado["prox_alerta"][tipo] = 0.0
         return False
     if agora < estado["prox_alerta"][tipo]:
@@ -212,34 +214,47 @@ def fechar_porta(simulacao_id, equipa, origem, destino, payload, motivo):
     estado = estados[simulacao_id]
     porta = (origem, destino)
     motivos = estado["portas_fechadas"].setdefault(porta, set())
+
     if motivo in motivos:
         return
-    if not motivos:
-        registar_atuador(
-            simulacao_id,
-            equipa,
-            f"porta_{motivo}",
-            comando_porta("CloseDoor", equipa, origem, destino),
-            payload,
-        )
+
+    deve_enviar = len(motivos) == 0
+
+    registar_atuador(
+        simulacao_id,
+        equipa,
+        f"porta_{motivo}",
+        comando_porta("CloseDoor", equipa, origem, destino),
+        payload,
+        enviar=deve_enviar,
+    )
+
     motivos.add(motivo)
 
 def abrir_porta(simulacao_id, equipa, origem, destino, payload, motivo):
     estado = estados[simulacao_id]
     porta = (origem, destino)
     motivos = estado["portas_fechadas"].get(porta)
+
     if not motivos or motivo not in motivos:
-        return
+        return False
+
     motivos.discard(motivo)
-    if not motivos:
-        registar_atuador(
-            simulacao_id,
-            equipa,
-            f"porta_{motivo}",
-            comando_porta("OpenDoor", equipa, origem, destino),
-            payload,
-        )
+    deve_enviar = len(motivos) == 0
+
+    registar_atuador(
+        simulacao_id,
+        equipa,
+        f"porta_{motivo}",
+        comando_porta("OpenDoor", equipa, origem, destino),
+        payload,
+        enviar=deve_enviar,
+    )
+
+    if deve_enviar:
         estado["portas_fechadas"].pop(porta, None)
+
+    return True
 
 def atuar_portas_sala(simulacao_id, equipa, sala, payload, motivo, fechar, entradas=False, saidas=False):
     if entradas:
@@ -345,32 +360,54 @@ def abrir_uma_porta_de_ruido(simulacao_id, equipa, payload):
     estado = estados[simulacao_id]
     melhor_porta = None
     menor_ocupacao_origem = None
+
     for porta, motivos in estado["portas_fechadas"].items():
-        if "ruido" not in motivos or len(motivos) > 1:
+        if "ruido" not in motivos:
             continue
+
         origem, destino = porta
         ocupacao = estado["ocupacao"].get(origem, {"odd": 0, "even": 0})
         total = ocupacao["odd"] + ocupacao["even"]
+
         if menor_ocupacao_origem is None or total < menor_ocupacao_origem:
             melhor_porta = (origem, destino)
             menor_ocupacao_origem = total
+
     if melhor_porta is not None:
         origem, destino = melhor_porta
-        abrir_porta(simulacao_id, equipa, origem, destino, payload, motivo="ruido")
+        return abrir_porta(simulacao_id, equipa, origem, destino, payload, motivo="ruido")
+
+    return False
 
 def tratar_temperatura(doc):
     simulacao_id = int(doc["simulacaoID"])
     payload = doc["payload"]
     estado = estados[simulacao_id]
     equipa = get_equipa(simulacao_id)
+
     valor = float(payload["Temperature"])
     tem_alerta = detectar_alerta("temperatura", valor, simulacao_id)
+
     if tem_alerta and not estado["ac_ligado"]:
-        registar_atuador(simulacao_id, equipa, "temperatura", comando_ac("AcOn", equipa), payload)
+        registar_atuador(
+            simulacao_id,
+            equipa,
+            "temperatura",
+            comando_ac("AcOn", equipa),
+            payload
+        )
         estado["ac_ligado"] = True
-    if valor_controlado("temperatura", valor, simulacao_id) and estado["ac_ligado"]:
-        registar_atuador(simulacao_id, equipa, "temperatura", comando_ac("AcOff", equipa), payload)
+
+    if valor <= float(setupmaze["normaltemperature"]) and estado["ac_ligado"]:
+        registar_atuador(
+            simulacao_id,
+            equipa,
+            "temperatura",
+            comando_ac("AcOff", equipa),
+            payload
+        )
         estado["ac_ligado"] = False
+
     return tem_alerta
 
 def tratar_som(doc):
@@ -389,6 +426,7 @@ def tratar_som(doc):
                 payload,
                 motivo="ruido",
                 fechar=True,
+                entradas=True,
                 saidas=True,
             )
     elif valor_controlado("som", valor, simulacao_id):
