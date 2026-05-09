@@ -230,10 +230,8 @@ def validar_mensagem(tipo, payload, received_at, equipa):
         elif destino < 0:
             erros.append("sala destino negativa")
 
-        if status is None:
+        if status is None or status not in (0, 1, 2):
             erros.append("Status invalido")
-        elif status < 0:
-            erros.append("status negativo")
 
         if (status is not None
             and origem is not None
@@ -403,10 +401,14 @@ def processar_mensagem(equipa, mensagem):
     received_at = mensagem["received_at"]
 
     erros = validar_mensagem(tipo, payload, received_at, equipa)
-    outlier = detetar_outlier(tipo, payload, equipa)
+    if erros:
+        categoria = "invalido: " + "; ".join(erros)
+        guardar_mensagem_invalida(equipa, tipo, payload, received_at, categoria)
+        return
 
-    if erros or outlier:
-        categoria = "outlier" if outlier else "invalido: " + "; ".join(erros)
+    outlier = detetar_outlier(tipo, payload, equipa)
+    if outlier:
+        categoria = "outlier"
         guardar_mensagem_invalida(equipa, tipo, payload, received_at, categoria)
         return
 
