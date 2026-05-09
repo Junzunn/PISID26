@@ -534,11 +534,16 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def on_message(client, userdata, msg):
-    payload = json.loads(msg.payload.decode("utf-8"))
+    try:
+        payload = json.loads(msg.payload.decode("utf-8"))
+    except Exception as e:
+        print(f"[MQTT ignorado] payload invalido: {e}")
+        return
+
     received_at = datetime.now()
 
     if msg.topic == TOPICO_PHP:
-        if payload["type"] == "Start":
+        if payload.get("type") == "Start":
             tratar_start_php(client, payload)
         return
 
