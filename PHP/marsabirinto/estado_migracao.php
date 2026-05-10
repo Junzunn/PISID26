@@ -54,6 +54,36 @@ function estado_valor(array $status, string $campo): string
     return isset($status[$campo]) && $status[$campo] !== null ? (string)$status[$campo] : '-';
 }
 
+function estado_classe(?string $estado): string
+{
+    if ($estado === 'OK') {
+        return 'ok';
+    }
+    if ($estado === '-' || $estado === null || $estado === '') {
+        return 'warn';
+    }
+    return 'erro';
+}
+
+function semaforo(string $texto, ?string $estado, string $detalhe = ''): string
+{
+    $classe = estado_classe($estado);
+    $html = '<span class="semaforo ' . h($classe) . '"></span>';
+    $html .= '<strong>' . h($texto) . ':</strong> ' . h($estado ?: '-');
+    if ($detalhe !== '') {
+        $html .= '<br><small class="muted">' . h($detalhe) . '</small>';
+    }
+    return $html;
+}
+
+function estado_manager(array $status): string
+{
+    if (isset($status['erro'])) {
+        return semaforo('Manager', 'ERRO', (string)$status['erro']);
+    }
+    return semaforo('Manager', 'OK');
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         $password = $_POST['password_confirm'] ?? '';
@@ -111,44 +141,42 @@ $flash = get_flash();
     <?php endif; ?>
 
     <p class="muted">
-        Esta página consulta os managers locais dos dois PCs. O PC1 gere o mongo_mqtt.py e o MongoDB.
-        O PC2 gere o mqtt_mysql.py e a ligação ao MySQL. O nuvem_mongo.py não é reiniciado por esta página.
+        Esta página verifica os gestores de migração dos dois PCs. O PC1 gere apenas o <strong>mongo_mqtt.py</strong>.
+        O <strong>nuvem_mongo.py</strong> não é reiniciado aqui, porque está ligado à execução do mazerun e à receção original dos sensores.
+        O PC2 gere o <strong>mqtt_mysql.py</strong>.
     </p>
 
-    <table>
-        <thead>
-        <tr>
-            <th>PC</th>
-            <th>Manager</th>
-            <th>Base de Dados</th>
-            <th>Processo Python</th>
-            <th>Documentos pendentes</th>
-        </tr>
-        </thead>
-        <tbody>
-        <tr>
-            <td>PC1</td>
-            <td><?= isset($statusPc1['erro']) ? h($statusPc1['erro']) : 'OK' ?></td>
-            <td>MongoDB: <?= h(estado_valor($statusPc1, 'mongo')) ?></td>
-            <td><?= h(estado_valor($statusPc1, 'processo')) ?>: <?= h(estado_valor($statusPc1, 'processo_estado')) ?></td>
-            <td>
-                Por tratar: <?= h(estado_valor($statusPc1, 'documentos_por_tratar')) ?><br>
-                Por migrar: <?= h(estado_valor($statusPc1, 'documentos_por_migrar')) ?>
-            </td>
-        </tr>
-        <tr>
-            <td>PC2</td>
-            <td><?= isset($statusPc2['erro']) ? h($statusPc2['erro']) : 'OK' ?></td>
-            <td>MySQL: <?= h(estado_valor($statusPc2, 'mysql')) ?></td>
-            <td><?= h(estado_valor($statusPc2, 'processo')) ?>: <?= h(estado_valor($statusPc2, 'processo_estado')) ?></td>
-            <td>-</td>
-        </tr>
-        </tbody>
-    </table>
+    <div class="status-grid">
+        <div class="status-card">
+            <h2>PC1 - Mongo e envio para PC2</h2>
+            <p><?= estado_manager($statusPc1) ?></p>
+            <p><?= semaforo('MongoDB', estado_valor($statusPc1, 'mongo'), estado_valor($statusPc1, 'mongo_erro') !== '-' ? estado_valor($statusPc1, 'mongo_erro') : '') ?></p>
+            <p><?= semaforo(estado_valor($statusPc1, 'processo'), estado_valor($statusPc1, 'processo_estado')) ?></p>
+            <p>
+                <strong>Documentos por tratar:</strong> <?= h(estado_valor($statusPc1, 'documentos_por_tratar')) ?><br>
+                <small class="muted">Ainda não foram analisados pelo mongo_mqtt.py.</small>
+            </p>
+            <p>
+                <strong>Documentos por migrar:</strong> <?= h(estado_valor($statusPc1, 'documentos_por_migrar')) ?><br>
+                <small class="muted">Já foram tratados no PC1, mas ainda não têm confirmação do PC2/MySQL.</small>
+            </p>
+            <?php if (estado_valor($statusPc1, 'nota') !== '-'): ?>
+                <p><small class="muted"><?= h(estado_valor($statusPc1, 'nota')) ?></small></p>
+            <?php endif; ?>
+        </div>
+
+        <div class="status-card">
+            <h2>PC2 - Escrita no MySQL</h2>
+            <p><?= estado_manager($statusPc2) ?></p>
+            <p><?= semaforo('MySQL', estado_valor($statusPc2, 'mysql'), estado_valor($statusPc2, 'mysql_erro') !== '-' ? estado_valor($statusPc2, 'mysql_erro') : '') ?></p>
+            <p><?= semaforo(estado_valor($statusPc2, 'processo'), estado_valor($statusPc2, 'processo_estado')) ?></p>
+            <p><small class="muted">Se o MySQL aparecer como ERRO mas o processo Python estiver OK, confirme o host, porta, utilizador e password no config.json do PC2.</small></p>
+        </div>
+    </div>
 
     <h2>Reiniciar migração</h2>
     <p class="muted">
-        Use esta ação apenas quando o processo de migração estiver parado ou quando for necessário forçar nova ligação.
+        Use esta ação apenas para reiniciar os scripts de migração. Esta página não reinicia o nuvem_mongo.py nem reinicia automaticamente os serviços MongoDB/MySQL do sistema operativo.
         Para evitar cliques acidentais, é obrigatório confirmar a password da conta atual.
     </p>
 

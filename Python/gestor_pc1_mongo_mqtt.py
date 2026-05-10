@@ -5,14 +5,15 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import mysql.connector
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
 
 from config_loader import BASE_DIR, load_config
 
-ROLE = "pc2"
-SCRIPT = "mqtt_mysql.py"
-PORT_KEY = "pc2_port"
-DEFAULT_PORT = 8082
+ROLE = "pc1"
+SCRIPT = "mongo_mqtt.py"
+PORT_KEY = "pc1_port"
+DEFAULT_PORT = 8081
 
 CONFIG = load_config()
 MANAGER = CONFIG.get("manager", {})
@@ -55,38 +56,52 @@ def reiniciar_processo():
 
 
 def monitor_loop():
+    # Este gestor gere apenas o mongo_mqtt.py.
+    # O nuvem_mongo.py continua a ser iniciado pelo fluxo da simulação/mazerun.
     iniciar_processo()
     while True:
         if not processo_ok():
-            print(f"[gestor] {SCRIPT} parado; a reiniciar")
+            print(f"[gestor PC1] {SCRIPT} parado; a reiniciar")
             iniciar_processo()
         time.sleep(2)
 
 
-def estado_mysql():
+def estado_mongo():
     try:
-        mysql = CONFIG.get("mysql", {})
-        conn = mysql.connector.connect(
-            host=mysql.get("host", "127.0.0.1"),
-            port=int(mysql.get("port", 3306)),
-            user=mysql.get("user"),
-            password=mysql.get("password"),
-            database=mysql.get("database", "Marsabirinto"),
-            connection_timeout=2,
-        )
-        conn.close()
-        return "OK"
+        mongo = CONFIG.get("mongo", {})
+        client = MongoClient(mongo.get("uri"), serverSelectionTimeoutMS=800)
+        client.admin.command("ping")
+        return "OK", None
+    except (PyMongoError, Exception) as erro:
+        return "ERRO", f"{type(erro).__name__}: {erro}"
+
+
+def contagens_mongo():
+    try:
+        mongo = CONFIG.get("mongo", {})
+        client = MongoClient(mongo.get("uri"), serverSelectionTimeoutMS=800)
+        db = client[mongo.get("database", "Marsabirinto")]
+        col = db["dados_sensores"]
+        return {
+            "documentos_por_tratar": col.count_documents({"checked": False}),
+            "documentos_por_migrar": col.count_documents({"checked": True, "migrated": False}),
+        }
     except Exception:
-        return "ERRO"
+        return {"documentos_por_tratar": None, "documentos_por_migrar": None}
 
 
 def status_payload():
-    return {
+    mongo_estado, mongo_erro = estado_mongo()
+    payload = {
         "pc": ROLE,
         "processo": SCRIPT,
         "processo_estado": "OK" if processo_ok() else "ERRO",
-        "mysql": estado_mysql(),
+        "mongo": mongo_estado,
+        "mongo_erro": mongo_erro,
+        "nota": "Este gestor reinicia apenas o mongo_mqtt.py; o nuvem_mongo.py não é gerido por esta página.",
     }
+    payload.update(contagens_mongo())
+    return payload
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -128,11 +143,11 @@ class Handler(BaseHTTPRequestHandler):
             PEDIDOS_TRATADOS.add(request_id)
 
         if processo_ok() and not bool(dados.get("force", False)):
-            self.enviar_json(200, {"resultado": "processo ja ativo", "status": status_payload()})
+            self.enviar_json(200, {"resultado": "mongo_mqtt.py ja ativo", "status": status_payload()})
             return
 
         reiniciar_processo()
-        self.enviar_json(200, {"resultado": "processo reiniciado", "status": status_payload()})
+        self.enviar_json(200, {"resultado": "mongo_mqtt.py reiniciado", "status": status_payload()})
 
     def log_message(self, format, *args):
         return
@@ -142,7 +157,7 @@ def main():
     port = int(MANAGER.get(PORT_KEY, DEFAULT_PORT))
     threading.Thread(target=monitor_loop, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"[gestor] PC2 ativo em http://0.0.0.0:{port}, a gerir {SCRIPT}")
+    print(f"[gestor PC1] ativo em http://0.0.0.0:{port}, a gerir apenas {SCRIPT}")
     server.serve_forever()
 
 
