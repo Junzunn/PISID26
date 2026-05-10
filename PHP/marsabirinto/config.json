@@ -1,18 +1,14 @@
 {
-  "mqtt": {
-    "broker": "broker.emqx.io",
-    "port": 1883,
-    "topic_php": "msgPHP",
-    "topic_pc1_pc2": "PC1_PC2",
-    "topic_atuador": "pisid_mazeact"
-  },
   "mysql": {
     "host": "192.168.1.228",
     "port": 3306,
-    "user": "software@pisid.pt",
-    "password": "softwarepisid",
     "database": "Marsabirinto",
     "charset": "utf8mb4"
+  },
+  "mqtt": {
+    "broker": "broker.emqx.io",
+    "port": 1883,
+    "topic_php": "msgPHP"
   },
   "manager": {
     "pc1_host": "192.168.1.228",
