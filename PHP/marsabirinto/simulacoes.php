@@ -18,8 +18,7 @@ $flash = get_flash();
 try {
     $pdo = db();
 
-    $stmt = $pdo->query(
-            'SELECT
+    $sql = 'SELECT
                 s.IDSimulacao,
                 COALESCE(u.Email, "Utilizador apagado") AS Criador,
                 s.Descricao,
@@ -38,11 +37,21 @@ try {
          LEFT JOIN Utilizador u
             ON u.IDUtilizador = s.IDCriador
          LEFT JOIN SimulacaoParametros p
-            ON p.IDSimulacao = s.IDSimulacao
-         ORDER BY s.IDSimulacao DESC'
-    );
+            ON p.IDSimulacao = s.IDSimulacao';
 
+    $params = [];
+
+    if ($user['Tipo'] === 'Equipe') {
+        $sql .= ' WHERE s.Equipa = :equipa';
+        $params[':equipa'] = (int)$user['Equipa'];
+    }
+
+    $sql .= ' ORDER BY s.IDSimulacao DESC';
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
     $simulacoes = $stmt->fetchAll();
+    
 } catch (Throwable $e) {
     $simulacoes = [];
     $flash = [
@@ -127,16 +136,23 @@ try {
                     variacao: <?= h($s['variacao_outlier']) ?>
                 </td>
                 <td>
+                    <?php
+                    $podeAlterar = $s['DataHorainicio'] === null && $s['DataHoraFim'] === null;
+                    ?>
                     <div class="row-actions">
-                        <form method="post" action="start_simulacao.php" class="inline-form"
-                              onsubmit="return confirm('Tem a certeza que quer iniciar esta simulacao?');">
-                            <input type="hidden" name="idsimulacao" value="<?= h($s['IDSimulacao']) ?>">
-                            <button type="submit">Iniciar</button>
-                        </form>
+                        <?php if ($podeAlterar): ?>
+                            <form method="post" action="start_simulacao.php" class="inline-form"
+                                  onsubmit="return confirm('Tem a certeza que quer iniciar esta simulacao?');">
+                                <input type="hidden" name="idsimulacao" value="<?= h($s['IDSimulacao']) ?>">
+                                <button type="submit">Iniciar</button>
+                            </form>
 
-                        <button type="button" onclick='openEditSimulacao(<?= json_for_html($s) ?>)'>
-                            Editar
-                        </button>
+                            <button type="button" onclick='openEditSimulacao(<?= json_for_html($s) ?>)'>
+                                Editar
+                            </button>
+                        <?php else: ?>
+                            <span class="muted">Sem acao</span>
+                        <?php endif; ?>
                     </div>
                 </td>
             </tr>

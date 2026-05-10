@@ -6,20 +6,27 @@ from queue import PriorityQueue, Empty
 
 import mysql.connector
 import paho.mqtt.client as mqtt
+from config_loader import load_config
 
 
-MQTT_BROKER = "broker.emqx.io"
-MQTT_PORT = 1883
-TOPICO_PC1_PC2 = "PC1_PC2"
-READY_INTERVAL = 2.0
+CONFIG = load_config()
+MQTT_CONFIG = CONFIG.get("mqtt", {})
+MIGRATION_CONFIG = CONFIG.get("migration", {})
+
+MQTT_BROKER = MQTT_CONFIG.get("broker", "broker.emqx.io")
+MQTT_PORT = int(MQTT_CONFIG.get("port", 1883))
+TOPICO_PC1_PC2 = MQTT_CONFIG.get("topic_pc1_pc2", "PC1_PC2")
+READY_INTERVAL = float(MIGRATION_CONFIG.get("ready_interval", 2.0))
 
 CLIENT_ID = f"mqtt-mysql-{uuid.uuid4().hex[:8]}"
 
+MYSQL_CONFIG = CONFIG.get("mysql", {})
 MYSQL = {
-    "host": "192.168.1.228",
-    "user": "software@pisid.pt",
-    "password": "softwarepisid",
-    "database": "Marsabirinto",
+    "host": MYSQL_CONFIG.get("host", "127.0.0.1"),
+    "port": int(MYSQL_CONFIG.get("port", 3306)),
+    "user": MYSQL_CONFIG.get("user", "software@pisid.pt"),
+    "password": MYSQL_CONFIG.get("password", "softwarepisid"),
+    "database": MYSQL_CONFIG.get("database", "Marsabirinto"),
 }
 
 filas = {}

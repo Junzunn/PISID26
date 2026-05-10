@@ -119,7 +119,6 @@ try {
                 <option value="">Escolher tipo</option>
                 <option value="AdminApp">AdminApp</option>
                 <option value="Equipe">Equipe</option>
-                <option value="Analista">Analista</option>
                 <option value="Software">Software</option>
             </select>
         </label>
@@ -178,7 +177,6 @@ try {
                 <option value="">Manter atual</option>
                 <option value="AdminApp">AdminApp</option>
                 <option value="Equipe">Equipe</option>
-                <option value="Analista">Analista</option>
                 <option value="Software">Software</option>
             </select>
         </label>

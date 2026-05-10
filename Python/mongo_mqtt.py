@@ -9,19 +9,27 @@ import mysql.connector
 import paho.mqtt.client as mqtt
 from pymongo import MongoClient
 from pymongo.errors import AutoReconnect, ServerSelectionTimeoutError
+from pymongo.errors import DuplicateKeyError
+from config_loader import load_config
 
-MQTT_BROKER = "broker.emqx.io"
-MQTT_PORT = 1883
-TOPICO_PHP = "msgPHP"
-TOPICO_PC1_PC2 = "PC1_PC2"
-TOPICO_ATUADOR = "pisid_mazeact"
+CONFIG = load_config()
+MQTT_CONFIG = CONFIG.get("mqtt", {})
+MIGRATION_CONFIG = CONFIG.get("migration", {})
+
+MQTT_BROKER = MQTT_CONFIG.get("broker", "broker.emqx.io")
+MQTT_PORT = int(MQTT_CONFIG.get("port", 1883))
+TOPICO_PHP = MQTT_CONFIG.get("topic_php", "msgPHP")
+TOPICO_PC1_PC2 = MQTT_CONFIG.get("topic_pc1_pc2", "PC1_PC2")
+TOPICO_ATUADOR = MQTT_CONFIG.get("topic_atuador", "pisid_mazeact")
 CLIENT_ID = f"mongo-mqtt-{uuid.uuid4().hex[:8]}"
 
-MAZE_DB = {"host": "194.210.86.10", "user": "aluno", "password": "aluno", "database": "maze"}
-MONGO_URI = "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=rs0"
-MONGO_DB = "Marsabirinto"
-BATCH_SIZE = 200
-intervalo_min_envio = 0.2
+MAZE_DB = CONFIG.get("maze_db", {"host": "194.210.86.10", "user": "aluno", "password": "aluno", "database": "maze"})
+MONGO_CONFIG = CONFIG.get("mongo", {})
+MONGO_URI = MONGO_CONFIG.get("uri", "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=rs0")
+MONGO_DB = MONGO_CONFIG.get("database", "Marsabirinto")
+BATCH_SIZE = int(MIGRATION_CONFIG.get("batch_size", 200))
+intervalo_min_envio = float(MIGRATION_CONFIG.get("min_send_interval", 0.2))
+mongo_scan_interval = float(MIGRATION_CONFIG.get("mongo_scan_interval", 0.1))
 
 setupmaze = {}
 saidas_por_sala = {}
@@ -130,6 +138,23 @@ def registar_atuador(simulacao_id, equipa, tipo_acao, comando, payload_origem, e
         "received_at": datetime.now(),
         "categoria": "acao do atuador",
     })
+
+
+def registar_start_simulacao(simulacao_id, payload):
+    try:
+        dados_nao_migrados.update_one(
+            {"_id": f"start:{int(simulacao_id)}"},
+            {"$set": {
+                "simulacaoID": int(simulacao_id),
+                "tipo": "controlo",
+                "payload": payload,
+                "received_at": datetime.now(),
+                "categoria": "start_simulacao",
+            }},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        pass
 
 
 def normal_tolerancia_tempos_threshold(tipo, simulacao_id):
@@ -407,6 +432,35 @@ def reconstruir_estado(simulacao_id):
     print(f"[Recover] simulacaoID={simulacao_id} ocupacao={estados[simulacao_id]['ocupacao']} scores={estados[simulacao_id]['scores_por_sala']} portas_score={estados[simulacao_id]['portas_score_fechadas']} ruido_global={estados[simulacao_id]['ruido_global_fechado']}")
 
 
+def recuperar_simulacoes_do_mongo():
+    starts = dados_nao_migrados.find({"tipo": "controlo", "categoria": "start_simulacao"})
+    recuperadas = 0
+
+    for doc in starts:
+        simulacao_id = int(doc["simulacaoID"])
+
+        fim_migrado = dados_sensores.count_documents({
+            "simulacaoID": simulacao_id,
+            "tipo": "fim_jogo",
+            "migrated": True,
+        }) > 0
+
+        if fim_migrado or simulacao_id in estados:
+            continue
+
+        payload = doc.get("payload", {})
+        if not payload:
+            continue
+
+        criar_estado(simulacao_id, payload)
+        reconstruir_estado(simulacao_id)
+        criar_worker(simulacao_id)
+        recuperadas += 1
+
+    if recuperadas:
+        print(f"[Recover automatico] {recuperadas} simulacao(oes) retomadas a partir do Mongo")
+
+
 def criar_worker(simulacao_id):
     estado = estados.get(simulacao_id)
     if estado is None:
@@ -419,17 +473,16 @@ def criar_worker(simulacao_id):
     thread.start()
 
 
-def start_php(payload, recover=False):
+def start_php(payload):
     simulacao_id = int(payload["IDSimulacao"])
     with lock:
         if simulacao_id in estados:
             print(f"[Start/Recover ignorado] simulacaoID={simulacao_id} ja esta ativo")
             return
         criar_estado(simulacao_id, payload)
-        if recover:
-            reconstruir_estado(simulacao_id)
+        registar_start_simulacao(simulacao_id, payload)
         criar_worker(simulacao_id)
-    print(f"[{'Recover' if recover else 'Start'}] simulacaoID={simulacao_id} equipa={payload['Equipa']}")
+    print(f"[Start] simulacaoID={simulacao_id} equipa={payload['Equipa']}")
 
 
 def limpar_simulacao(simulacao_id):
@@ -496,9 +549,7 @@ def on_message(client, userdata, msg):
     payload = json.loads(msg.payload.decode())
     if msg.topic == TOPICO_PHP:
         if payload.get("type") == "Start":
-            start_php(payload, recover=False)
-        elif payload.get("type") == "Recover":
-            start_php(payload, recover=True)
+            start_php(payload)
         return
     if msg.topic == TOPICO_PC1_PC2 and payload.get("from") == "PC2":
         if payload.get("type") == "READY":
@@ -510,6 +561,7 @@ def on_message(client, userdata, msg):
 def main():
     carregar_maze()
     criar_indices_mongo()
+    recuperar_simulacoes_do_mongo()
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
     mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
@@ -517,7 +569,7 @@ def main():
     print("[mongo_mqtt] ativo")
     while True:
         distribuir_docs()
-        time.sleep(0.1)
+        time.sleep(mongo_scan_interval)
 
 if __name__ == "__main__":
     main()

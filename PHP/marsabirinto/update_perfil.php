@@ -22,21 +22,18 @@ try {
     $telemovel = nullable_string_from_post('telemovel');
     $email = nullable_string_from_post('email');
     $datanascimento = nullable_string_from_post('datanascimento');
-    $equipa = nullable_positive_int_from_post('equipa');
-
     $emailFoiAlterado = $email !== null && $email !== $oldEmail;
 
     $pdo = db();
 
     $stmt = $pdo->prepare(
-        'CALL utilizador_alterar_proprios_dados(:nome, :telemovel, :email, :datanascimento, :equipa)'
+        'CALL utilizador_alterar_proprios_dados(:nome, :telemovel, :email, :datanascimento)'
     );
 
     bind_nullable_string($stmt, ':nome', $nome);
     bind_nullable_string($stmt, ':telemovel', $telemovel);
     bind_nullable_string($stmt, ':email', $email);
     bind_nullable_string($stmt, ':datanascimento', $datanascimento);
-    bind_nullable_int($stmt, ':equipa', $equipa);
 
     $stmt->execute();
     $stmt->closeCursor();

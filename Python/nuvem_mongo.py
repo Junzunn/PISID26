@@ -13,28 +13,30 @@ import mysql.connector
 import paho.mqtt.client as mqtt
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError, ServerSelectionTimeoutError, AutoReconnect, DuplicateKeyError
+from config_loader import load_config
 
-MQTT_BROKER = "broker.emqx.io"
-MQTT_PORT = 1883
-TOPICO_PHP = "msgPHP"
+CONFIG = load_config()
+MQTT_CONFIG = CONFIG.get("mqtt", {})
+
+MQTT_BROKER = MQTT_CONFIG.get("broker", "broker.emqx.io")
+MQTT_PORT = int(MQTT_CONFIG.get("port", 1883))
+TOPICO_PHP = MQTT_CONFIG.get("topic_php", "msgPHP")
 TOPICOS_SENSORES_BASE = ["pisid_mazemov", "pisid_mazetemp", "pisid_mazesound"]
 CLIENT_ID = f"nuvem-mongo-{uuid.uuid4().hex[:8]}"
 
-MAZE_DB_CONFIG = {
+MAZE_DB_CONFIG = CONFIG.get("maze_db", {
     "host": "194.210.86.10",
     "user": "aluno",
     "password": "aluno",
     "database": "maze",
-}
+})
 
-MONGO_URI = (
-    "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/"
-    "?replicaSet=rs0"
-    "&retryWrites=true"
-    "&serverSelectionTimeoutMS=200"
-    "&connectTimeoutMS=1000"
+MONGO_CONFIG = CONFIG.get("mongo", {})
+MONGO_URI = MONGO_CONFIG.get(
+    "uri",
+    "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=rs0&retryWrites=true&serverSelectionTimeoutMS=200&connectTimeoutMS=1000"
 )
-MONGO_DB = "Marsabirinto"
+MONGO_DB = MONGO_CONFIG.get("database", "Marsabirinto")
 
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 MAZERUN_PATH = os.path.join(BASE_DIR, "mazerun")
