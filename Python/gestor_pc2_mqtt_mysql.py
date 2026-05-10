@@ -16,7 +16,6 @@ DEFAULT_PORT = 8082
 
 CONFIG = load_config()
 MANAGER = CONFIG.get("manager", {})
-TOKEN = MANAGER.get("token", "ALTERAR_ESTA_SENHA")
 PEDIDOS_TRATADOS = set()
 PROCESSO = None
 PROCESSO_LOCK = threading.Lock()
@@ -65,14 +64,14 @@ def monitor_loop():
 
 def estado_mysql():
     try:
-        mysql = CONFIG.get("mysql", {})
+        mysql_cfg = CONFIG.get("mysql", {})
         conn = mysql.connector.connect(
-            host=mysql.get("host", "127.0.0.1"),
-            port=int(mysql.get("port", 3306)),
-            user=mysql.get("user"),
-            password=mysql.get("password"),
-            database=mysql.get("database", "Marsabirinto"),
-            connection_timeout=2,
+            host=mysql_cfg.get("host", "127.0.0.1"),
+            port=int(mysql_cfg.get("port", 3306)),
+            user=mysql_cfg.get("user"),
+            password=mysql_cfg.get("password"),
+            database=mysql_cfg.get("database", "Marsabirinto"),
+            connection_timeout=1,
         )
         conn.close()
         return "OK", None
@@ -84,6 +83,7 @@ def status_payload():
     mysql_estado, mysql_erro = estado_mysql()
     return {
         "pc": ROLE,
+        "manager": "OK",
         "processo": SCRIPT,
         "processo_estado": "OK" if processo_ok() else "ERRO",
         "mysql": mysql_estado,
@@ -94,11 +94,14 @@ def status_payload():
 class Handler(BaseHTTPRequestHandler):
     def enviar_json(self, code, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_GET(self):
         if self.path.split("?", 1)[0] != "/status":
@@ -118,9 +121,6 @@ class Handler(BaseHTTPRequestHandler):
             self.enviar_json(400, {"erro": "json invalido"})
             return
 
-        if dados.get("token") != TOKEN:
-            self.enviar_json(403, {"erro": "token invalido"})
-            return
 
         request_id = str(dados.get("request_id", ""))
         if request_id and request_id in PEDIDOS_TRATADOS:
@@ -135,6 +135,8 @@ class Handler(BaseHTTPRequestHandler):
 
         reiniciar_processo()
         self.enviar_json(200, {"resultado": "mqtt_mysql.py reiniciado", "status": status_payload()})
+        print("--------------------------------------------")
+        print("PC2 reiniciado")
 
     def log_message(self, format, *args):
         return
@@ -144,7 +146,7 @@ def main():
     port = int(MANAGER.get(PORT_KEY, DEFAULT_PORT))
     threading.Thread(target=monitor_loop, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"[gestor PC2] ativo em http://0.0.0.0:{port}, a gerir {SCRIPT}")
+    print(f"[gestor PC2] ativo, a gerir {SCRIPT}")
     server.serve_forever()
 
 

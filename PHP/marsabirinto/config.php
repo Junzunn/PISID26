@@ -24,6 +24,5 @@ define('MQTT_BROKER', (string)($mqttConfig['broker'] ?? 'broker.emqx.io'));
 define('MQTT_PORT', (int)($mqttConfig['port'] ?? 1883));
 define('MQTT_TOPIC', (string)($mqttConfig['topic_php'] ?? 'msgPHP'));
 
-define('MIGRATION_MANAGER_TOKEN', (string)($managerConfig['token'] ?? 'ALTERAR_ESTA_SENHA'));
 define('PC1_MANAGER_URL', 'http://' . (string)($managerConfig['pc1_host'] ?? '127.0.0.1') . ':' . (int)($managerConfig['pc1_port'] ?? 8081));
 define('PC2_MANAGER_URL', 'http://' . (string)($managerConfig['pc2_host'] ?? '127.0.0.1') . ':' . (int)($managerConfig['pc2_port'] ?? 8082));

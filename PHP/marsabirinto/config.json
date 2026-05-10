@@ -15,7 +15,6 @@
     "charset": "utf8mb4"
   },
   "manager": {
-    "token": "ALTERAR_ESTA_SENHA",
     "pc1_host": "192.168.1.228",
     "pc1_port": 8081,
     "pc2_host": "192.168.1.228",

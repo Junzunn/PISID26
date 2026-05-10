@@ -10,7 +10,7 @@ function manager_status(string $url): array
     $context = stream_context_create([
         'http' => [
             'method' => 'GET',
-            'timeout' => 1.5,
+            'timeout' => 3,
         ],
     ]);
 
@@ -26,7 +26,6 @@ function manager_status(string $url): array
 function manager_restart(string $url, bool $force): array
 {
     $payload = json_encode([
-        'token' => MIGRATION_MANAGER_TOKEN,
         'request_id' => bin2hex(random_bytes(12)),
         'force' => $force,
     ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
@@ -36,7 +35,8 @@ function manager_restart(string $url, bool $force): array
             'method' => 'POST',
             'header' => "Content-Type: application/json\r\n",
             'content' => $payload,
-            'timeout' => 3,
+            'timeout' => 8,
+            'ignore_errors' => true,
         ],
     ]);
 
@@ -84,6 +84,16 @@ function estado_manager(array $status): string
     return semaforo('Manager', 'OK');
 }
 
+function processo_ativo(array $status): bool
+{
+    return !isset($status['erro'])
+        && isset($status['processo_estado'])
+        && (string)$status['processo_estado'] === 'OK';
+}
+
+$statusPc1 = manager_status(PC1_MANAGER_URL);
+$statusPc2 = manager_status(PC2_MANAGER_URL);
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         $password = $_POST['password_confirm'] ?? '';
@@ -95,6 +105,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $target = $_POST['target'] ?? '';
         $force = isset($_POST['force']);
+
+        if (!$force) {
+            $ativoPc1 = ($target === 'pc1' || $target === 'all') && processo_ativo($statusPc1);
+            $ativoPc2 = ($target === 'pc2' || $target === 'all') && processo_ativo($statusPc2);
+
+            if ($ativoPc1 || $ativoPc2) {
+                throw new RuntimeException('O processo selecionado ainda está ativo. Para reiniciar mesmo assim, confirme a opção Forçar reinício.');
+            }
+        }
+
         $resultados = [];
 
         if ($target === 'pc1' || $target === 'all') {
@@ -115,8 +135,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     redirect('estado_migracao.php');
 }
 
-$statusPc1 = manager_status(PC1_MANAGER_URL);
-$statusPc2 = manager_status(PC2_MANAGER_URL);
 $flash = get_flash();
 ?>
 <!doctype html>
@@ -183,10 +201,10 @@ $flash = get_flash();
     <form method="post" class="card">
         <label>
             Alvo
-            <select name="target" required>
-                <option value="pc1">Reiniciar PC1: mongo_mqtt.py</option>
-                <option value="pc2">Reiniciar PC2: mqtt_mysql.py</option>
-                <option value="all">Reiniciar PC1 e PC2</option>
+            <select name="target" id="restartTarget" required>
+                <option value="pc1" data-active="<?= processo_ativo($statusPc1) ? '1' : '0' ?>">Reiniciar PC1: mongo_mqtt.py</option>
+                <option value="pc2" data-active="<?= processo_ativo($statusPc2) ? '1' : '0' ?>">Reiniciar PC2: mqtt_mysql.py</option>
+                <option value="all" data-active="<?= (processo_ativo($statusPc1) || processo_ativo($statusPc2)) ? '1' : '0' ?>">Reiniciar PC1 e PC2</option>
             </select>
         </label>
 
@@ -196,14 +214,38 @@ $flash = get_flash();
         </label>
 
         <label class="inline-check">
-            <input type="checkbox" name="force" value="1">
+            <input type="checkbox" name="force" value="1" id="forceRestart">
             Forçar reinício mesmo que o processo esteja ativo
         </label>
+        <p id="restartHint" class="muted"></p>
 
         <div class="actions">
-            <button type="submit" class="danger">Executar reinício</button>
+            <button type="submit" class="danger" id="restartButton">Executar reinício</button>
         </div>
     </form>
 </div>
+
+<script>
+(function () {
+    const target = document.getElementById('restartTarget');
+    const force = document.getElementById('forceRestart');
+    const button = document.getElementById('restartButton');
+    const hint = document.getElementById('restartHint');
+
+    function updateButton() {
+        const option = target.options[target.selectedIndex];
+        const active = option && option.dataset.active === '1';
+        const blocked = active && !force.checked;
+        button.disabled = blocked;
+        hint.textContent = blocked
+            ? 'O processo selecionado está ativo. Para reiniciar, confirme primeiro a opção de força.'
+            : 'Depois de confirmar a password, a ação será enviada ao gestor de migração selecionado.';
+    }
+
+    target.addEventListener('change', updateButton);
+    force.addEventListener('change', updateButton);
+    updateButton();
+}());
+</script>
 </body>
 </html>
