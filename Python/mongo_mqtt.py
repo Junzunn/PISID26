@@ -21,6 +21,7 @@ MAZE_DB = {"host": "194.210.86.10", "user": "aluno", "password": "aluno", "datab
 MONGO_URI = "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=rs0"
 MONGO_DB = "Marsabirinto"
 BATCH_SIZE = 200
+intervalo_min_envio = 0.2
 
 setupmaze = {}
 saidas_por_sala = {}
@@ -459,7 +460,7 @@ def serializar(doc):
 
 def enviar_lote(payload_ready):
     global ultimo_envio
-    if time.time() - ultimo_envio < 1:
+    if time.time() - ultimo_envio < intervalo_min_envio:
         return
     busy = set(int(x) for x in payload_ready.get("busy", []))
     with lock:

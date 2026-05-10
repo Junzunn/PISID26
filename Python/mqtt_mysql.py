@@ -11,6 +11,7 @@ import paho.mqtt.client as mqtt
 MQTT_BROKER = "broker.emqx.io"
 MQTT_PORT = 1883
 TOPICO_PC1_PC2 = "PC1_PC2"
+READY_INTERVAL = 2.0
 
 CLIENT_ID = f"mqtt-mysql-{uuid.uuid4().hex[:8]}"
 
@@ -24,30 +25,45 @@ MYSQL = {
 filas = {}
 ids_em_fila = set()
 simulacoes_ocupadas = set()
+ultimo_ready = 0.0
 
 lock = threading.Lock()
-
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
 
 
 def publicar(payload):
     msg = json.dumps(payload, ensure_ascii=False)
     mqtt_client.publish(TOPICO_PC1_PC2, msg, qos=1).wait_for_publish()
-    #print(f"[MQTT OUT] {msg}")
+    print(f"[MQTT OUT] {msg}")
+
+
+def publicar_ready(forcar=False):
+    global ultimo_ready
+
+    agora = time.time()
+
+    with lock:
+        if simulacoes_ocupadas:
+            return
+
+        if not forcar and agora - ultimo_ready < READY_INTERVAL:
+            return
+
+        ultimo_ready = agora
+
+    publicar({
+        "from": "PC2",
+        "type": "READY",
+        "busy": [],
+    })
 
 
 def ready_loop():
+    publicar_ready(forcar=True)
+
     while True:
-        with lock:
-            busy = sorted(simulacoes_ocupadas)
-
-        publicar({
-            "from": "PC2",
-            "type": "READY",
-            "busy": busy,
-        })
-
-        time.sleep(1.5)
+        time.sleep(0.2)
+        publicar_ready()
 
 
 def ligar_mysql():
@@ -69,9 +85,10 @@ def hora(doc):
 def registar_fim_jogo(conn, cur, simulacao_id):
     try:
         chamar_sp(conn, cur, "simulacao_registar_fim", [simulacao_id])
-    except mysql.connector.Error as e:
-        if "ja foi registado" not in str(e):
+    except mysql.connector.Error as erro:
+        if "ja foi registado" not in str(erro):
             raise
+
 
 def migrar(conn, cur, doc):
     sid = int(doc["simulacaoID"])
@@ -134,17 +151,24 @@ def worker(simulacao_id):
             try:
                 seq, mongo_id, doc = fila.get(timeout=0.5)
             except Empty:
+                ficou_livre = False
+
                 with lock:
-                    if fila.empty():
+                    if fila.empty() and simulacao_id in simulacoes_ocupadas:
                         simulacoes_ocupadas.discard(simulacao_id)
+                        ficou_livre = True
+
+                if ficou_livre:
+                    publicar_ready(forcar=True)
+
                 continue
 
             while True:
                 try:
                     migrar(conn, cur, doc)
                     break
-                except mysql.connector.Error as e:
-                    print(f"[MySQL retry] simulacaoID={simulacao_id} seq={seq}: {e}")
+                except mysql.connector.Error as erro:
+                    print(f"[MySQL retry] simulacaoID={simulacao_id} seq={seq}: {erro}")
                     cur.close()
                     conn.close()
                     time.sleep(2)
@@ -168,6 +192,7 @@ def worker(simulacao_id):
                     simulacoes_ocupadas.discard(simulacao_id)
 
                 print(f"[cleanup] mqtt_mysql simulacaoID={simulacao_id}")
+                publicar_ready(forcar=True)
                 return
 
     finally:
@@ -181,16 +206,17 @@ def criar_worker(simulacao_id):
 
     filas[simulacao_id] = PriorityQueue()
 
-    thread = threading.Thread(
+    threading.Thread(
         target=worker,
         args=(simulacao_id,),
         daemon=True,
         name=f"mysql_worker_{simulacao_id}",
-    )
-    thread.start()
+    ).start()
 
 
 def receber_docs(docs):
+    recebidos = 0
+
     with lock:
         for doc in docs:
             sid = int(doc["simulacaoID"])
@@ -203,8 +229,9 @@ def receber_docs(docs):
             ids_em_fila.add(mongo_id)
             simulacoes_ocupadas.add(sid)
             filas[sid].put((int(doc["seq"]), mongo_id, doc))
+            recebidos += 1
 
-    print(f"[DATA] recebidos {len(docs)} docs")
+    print(f"[DATA] recebidos {len(docs)} docs, aceites {recebidos}")
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
