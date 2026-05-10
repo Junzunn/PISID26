@@ -1,17 +1,19 @@
-import argparse
 import json
 import subprocess
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
-import mysql.connector
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
 from config_loader import BASE_DIR, load_config
+
+ROLE = "pc1"
+SCRIPT = "mongo_mqtt.py"
+PORT_KEY = "pc1_port"
+DEFAULT_PORT = 8081
 
 CONFIG = load_config()
 MANAGER = CONFIG.get("manager", {})
@@ -19,8 +21,6 @@ TOKEN = MANAGER.get("token", "ALTERAR_ESTA_SENHA")
 PEDIDOS_TRATADOS = set()
 PROCESSO = None
 PROCESSO_LOCK = threading.Lock()
-ROLE = None
-SCRIPT = None
 
 
 def iniciar_processo():
@@ -59,7 +59,7 @@ def monitor_loop():
     iniciar_processo()
     while True:
         if not processo_ok():
-            print(f"[manager] {SCRIPT} parado; a reiniciar")
+            print(f"[gestor] {SCRIPT} parado; a reiniciar")
             iniciar_processo()
         time.sleep(2)
 
@@ -70,9 +70,7 @@ def estado_mongo():
         client = MongoClient(mongo.get("uri"), serverSelectionTimeoutMS=800)
         client.admin.command("ping")
         return "OK"
-    except PyMongoError:
-        return "ERRO"
-    except Exception:
+    except (PyMongoError, Exception):
         return "ERRO"
 
 
@@ -90,30 +88,14 @@ def contagens_mongo():
         return {"documentos_por_tratar": None, "documentos_por_migrar": None}
 
 
-def estado_mysql():
-    try:
-        mysql = CONFIG.get("mysql", {})
-        conn = mysql.connector.connect(
-            host=mysql.get("host", "127.0.0.1"),
-            port=int(mysql.get("port", 3306)),
-            user=mysql.get("user"),
-            password=mysql.get("password"),
-            database=mysql.get("database", "Marsabirinto"),
-            connection_timeout=2,
-        )
-        conn.close()
-        return "OK"
-    except Exception:
-        return "ERRO"
-
-
 def status_payload():
-    payload = {"pc": ROLE, "processo": SCRIPT, "processo_estado": "OK" if processo_ok() else "ERRO"}
-    if ROLE == "pc1":
-        payload["mongo"] = estado_mongo()
-        payload.update(contagens_mongo())
-    else:
-        payload["mysql"] = estado_mysql()
+    payload = {
+        "pc": ROLE,
+        "processo": SCRIPT,
+        "processo_estado": "OK" if processo_ok() else "ERRO",
+        "mongo": estado_mongo(),
+    }
+    payload.update(contagens_mongo())
     return payload
 
 
@@ -155,8 +137,7 @@ class Handler(BaseHTTPRequestHandler):
         if request_id:
             PEDIDOS_TRATADOS.add(request_id)
 
-        force = bool(dados.get("force", False))
-        if processo_ok() and not force:
+        if processo_ok() and not bool(dados.get("force", False)):
             self.enviar_json(200, {"resultado": "processo ja ativo", "status": status_payload()})
             return
 
@@ -168,17 +149,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global ROLE, SCRIPT
-    parser = argparse.ArgumentParser()
-    parser.add_argument("role", choices=["pc1", "pc2"])
-    args = parser.parse_args()
-    ROLE = args.role
-    SCRIPT = "mongo_mqtt.py" if ROLE == "pc1" else "mqtt_mysql.py"
-    port = int(MANAGER.get("pc1_port" if ROLE == "pc1" else "pc2_port", 8081 if ROLE == "pc1" else 8082))
-
+    port = int(MANAGER.get(PORT_KEY, DEFAULT_PORT))
     threading.Thread(target=monitor_loop, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"[manager] {ROLE} ativo em http://0.0.0.0:{port}, a gerir {SCRIPT}")
+    print(f"[gestor] PC1 ativo em http://0.0.0.0:{port}, a gerir {SCRIPT}")
     server.serve_forever()
 
 
