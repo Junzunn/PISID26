@@ -4,6 +4,7 @@ import threading
 import uuid
 from datetime import datetime
 from queue import PriorityQueue, Empty
+
 import mysql.connector
 import paho.mqtt.client as mqtt
 from pymongo import MongoClient
@@ -34,6 +35,7 @@ estados = {}
 ids_em_fila = set()
 ultimo_envio = 0.0
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
+
 
 def carregar_maze():
     global setupmaze, saidas_por_sala, entradas_por_sala
@@ -66,6 +68,7 @@ def criar_estado(simulacao_id, payload):
         "ocupacao": {},
         "ac_ligado": False,
         "portas_score_fechadas": set(),
+        "scores_por_sala": {},
         "ruido_global_fechado": False,
         "proxima_atuacao_ruido": 0.0,
         "largada_finalizada": False,
@@ -168,11 +171,12 @@ def calcular_tempo_alerta(tipo, valor, simulacao_id):
 
 
 def calcular_tempo_fecho_ruido(valor, simulacao_id):
-    _, _, tempo_min, tempo_max, _ = normal_tolerancia_tempos_threshold("som", simulacao_id)
+    _, _, tempo_min, tempo_max, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
     risco = calcular_risco("som", valor, simulacao_id)
-    risco = max(0.0, min(1.0, risco))
-
-    return tempo_min + risco * (tempo_max - tempo_min)
+    if risco >= 1 or threshold >= 1:
+        return tempo_max
+    progresso = (risco - threshold) / (1 - threshold)
+    return max(tempo_min, min(tempo_max, tempo_min + progresso * (tempo_max - tempo_min)))
 
 
 def detectar_alerta(tipo, valor, simulacao_id):
@@ -209,7 +213,7 @@ def mudar_ocupacao(ocupacao, sala, grupo, delta):
 
 
 def contar_scores(simulacao_id, equipa, sala):
-    return dados_nao_migrados.count_documents({"simulacaoID": int(simulacao_id), "tipo": "atuador", "payload.tipo_acao": "score", "payload.comando": comando_score(int(equipa), int(sala))})
+    return estados[simulacao_id]["scores_por_sala"].get(int(sala), 0)
 
 
 def controlar_portas_score(simulacao_id, equipa, sala, payload, fechar):
@@ -261,10 +265,14 @@ def tentar_score_sala(simulacao_id, equipa, sala, payload):
     tentativas = contar_scores(simulacao_id, equipa, sala)
     if tentativas >= 3:
         return
+    nova_tentativa = tentativas + 1
     registar_atuador(simulacao_id, equipa, "score", comando_score(equipa, sala), payload)
+    estado["scores_por_sala"][int(sala)] = nova_tentativa
+
     if not estado["largada_finalizada"]:
         return
-    controlar_portas_score(simulacao_id, equipa, sala, payload, fechar=(tentativas + 1 < 3))
+
+    controlar_portas_score(simulacao_id, equipa, sala, payload, fechar=(nova_tentativa < 3))
 
 
 def tentar_score_todas_salas(simulacao_id, payload):
@@ -294,39 +302,22 @@ def tratar_som(doc):
     payload = doc["payload"]
     estado = estados[simulacao_id]
     equipa = get_equipa(simulacao_id)
-
     valor = float(payload["Sound"])
     agora = time.time()
-
     tem_alerta = detectar_alerta("som", valor, simulacao_id)
 
     normalnoise = float(setupmaze["normalnoise"])
-    risco = calcular_risco("som", valor, simulacao_id)
-    _, _, tempo_min_ruido, tempo_max_ruido, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
 
     if tem_alerta and not estado["ruido_global_fechado"]:
-        registar_atuador(
-            simulacao_id,
-            equipa,
-            "porta_ruido_global",
-            comando_all_door("CloseAllDoor", equipa),
-            payload
-        )
-
+        registar_atuador(simulacao_id, equipa, "porta_ruido_global", comando_all_door("CloseAllDoor", equipa), payload)
         estado["ruido_global_fechado"] = True
         estado["proxima_atuacao_ruido"] = agora + calcular_tempo_fecho_ruido(valor, simulacao_id)
 
-    elif estado["ruido_global_fechado"]:
-        pode_abrir_por_normal = valor <= normalnoise
-        pode_abrir_por_tempo = agora >= estado["proxima_atuacao_ruido"] and risco < threshold
-
-        if pode_abrir_por_normal or pode_abrir_por_tempo:
-            abrir_portas_sem_score(simulacao_id, equipa, payload)
-
-            estado["proxima_atuacao_ruido"] = agora + tempo_min_ruido
-
-            janela_movimento = tempo_min_ruido + threshold * (tempo_max_ruido - tempo_min_ruido)
-            estado["prox_alerta"]["som"] = agora + janela_movimento
+    elif estado["ruido_global_fechado"] and (valor <= normalnoise or agora >= estado["proxima_atuacao_ruido"]):
+        abrir_portas_sem_score(simulacao_id, equipa, payload)
+        _, _, tempo_min_ruido, tempo_max_ruido, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
+        estado["proxima_atuacao_ruido"] = agora + tempo_min_ruido
+        estado["prox_alerta"]["som"] = agora + tempo_min_ruido + threshold * (tempo_max_ruido - tempo_min_ruido)
 
     return tem_alerta
 
@@ -378,12 +369,18 @@ def worker(simulacao_id):
 
 def reconstruir_atuadores(simulacao_id):
     estado = estados[simulacao_id]
-    docs = dados_nao_migrados.find({"simulacaoID": int(simulacao_id), "tipo": "atuador", "payload.tipo_acao": {"$in": ["porta_score", "porta_ruido_global", "temperatura"]}}).sort("received_at", 1)
+    docs = dados_nao_migrados.find({"simulacaoID": int(simulacao_id), "tipo": "atuador", "payload.tipo_acao": {"$in": ["score", "porta_score", "porta_ruido_global", "temperatura"]}}).sort("received_at", 1)
     for doc in docs:
         payload = doc.get("payload", {})
         tipo_acao = payload.get("tipo_acao", "")
         comando = payload.get("comando", "")
-        if tipo_acao == "temperatura":
+        if tipo_acao == "score":
+            try:
+                sala = int(comando.split("Room:")[1].split("}")[0].strip())
+                estado["scores_por_sala"][sala] = estado["scores_por_sala"].get(sala, 0) + 1
+            except Exception:
+                pass
+        elif tipo_acao == "temperatura":
             if "AcOn" in comando:
                 estado["ac_ligado"] = True
             elif "AcOff" in comando:
@@ -406,7 +403,7 @@ def reconstruir_estado(simulacao_id):
     for doc in docs:
         tratar_movimento(doc, emitir_score=False)
     reconstruir_atuadores(simulacao_id)
-    print(f"[Recover] simulacaoID={simulacao_id} ocupacao={estados[simulacao_id]['ocupacao']} portas_score={estados[simulacao_id]['portas_score_fechadas']} ruido_global={estados[simulacao_id]['ruido_global_fechado']}")
+    print(f"[Recover] simulacaoID={simulacao_id} ocupacao={estados[simulacao_id]['ocupacao']} scores={estados[simulacao_id]['scores_por_sala']} portas_score={estados[simulacao_id]['portas_score_fechadas']} ruido_global={estados[simulacao_id]['ruido_global_fechado']}")
 
 
 def criar_worker(simulacao_id):
@@ -520,7 +517,6 @@ def main():
     while True:
         distribuir_docs()
         time.sleep(0.1)
-
 
 if __name__ == "__main__":
     main()
