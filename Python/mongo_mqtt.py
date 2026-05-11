@@ -146,10 +146,10 @@ def registar_start_simulacao(simulacao_id, payload):
             {"_id": f"start:{int(simulacao_id)}"},
             {"$set": {
                 "simulacaoID": int(simulacao_id),
-                "tipo": "controlo",
+                "tipo": "simulacao",
                 "payload": payload,
                 "received_at": datetime.now(),
-                "categoria": "start_simulacao",
+                "categoria": "inicio_simulacao"
             }},
             upsert=True,
         )
@@ -238,10 +238,6 @@ def mudar_ocupacao(ocupacao, sala, grupo, delta):
     ocupacao[sala][grupo] = max(0, ocupacao[sala][grupo] + delta)
 
 
-def contar_scores(simulacao_id, equipa, sala):
-    return estados[simulacao_id]["scores_por_sala"].get(int(sala), 0)
-
-
 def controlar_portas_score(simulacao_id, equipa, sala, payload, fechar):
     estado = estados[simulacao_id]
     portas = [(origem, sala) for origem in entradas_por_sala.get(sala, [])]
@@ -283,28 +279,49 @@ def abrir_portas_sem_score(simulacao_id, equipa, payload):
         )
 
 
-def tentar_score_sala(simulacao_id, equipa, sala, payload):
+def tentar_score_sala(simulacao_id, sala, payload):
     estado = estados[simulacao_id]
-    ocupacao = estado["ocupacao"].get(sala)
-    if not ocupacao or ocupacao["odd"] != ocupacao["even"] or ocupacao["odd"] == 0:
-        return
-    tentativas = contar_scores(simulacao_id, equipa, sala)
+    equipa = get_equipa(simulacao_id)
+    sala = int(sala)
+    tentativas = estado["scores_por_sala"].get(sala, 0)
+
     if tentativas >= 3:
         return
+
     nova_tentativa = tentativas + 1
     registar_atuador(simulacao_id, equipa, "score", comando_score(equipa, sala), payload)
-    estado["scores_por_sala"][int(sala)] = nova_tentativa
+    estado["scores_por_sala"][sala] = nova_tentativa
 
-    if not estado["largada_finalizada"]:
-        return
-
-    controlar_portas_score(simulacao_id, equipa, sala, payload, fechar=(nova_tentativa < 3))
+    if estado["largada_finalizada"]:
+        controlar_portas_score(simulacao_id, equipa, sala, payload, fechar=(nova_tentativa < 3))
 
 
-def tentar_score_todas_salas(simulacao_id, payload):
+def verificar_scores(simulacao_id, payload, apenas_compressao=False):
+    estado = estados[simulacao_id]
     equipa = get_equipa(simulacao_id)
-    for sala in sorted(estados[simulacao_id]["ocupacao"].keys()):
-        tentar_score_sala(simulacao_id, equipa, sala, payload)
+
+    if apenas_compressao:
+        salas = {
+            int(sala)
+            for porta in estado["portas_score_fechadas"]
+            for sala in porta
+            if 0 < estado["scores_por_sala"].get(int(sala), 0) < 3
+        }
+    else:
+        salas = set(int(sala) for sala in estado["ocupacao"].keys())
+
+    for sala in sorted(salas):
+        ocupacao = estado["ocupacao"].get(sala)
+        tentativas = estado["scores_por_sala"].get(sala, 0)
+        em_compressao = any(sala in porta for porta in estado["portas_score_fechadas"])
+        equilibrada = bool(ocupacao and ocupacao["odd"] == ocupacao["even"] and ocupacao["odd"] > 0)
+
+        if not equilibrada:
+            if em_compressao and 0 < tentativas < 3:
+                controlar_portas_score(simulacao_id, equipa, sala, payload, fechar=False)
+            continue
+
+        tentar_score_sala(simulacao_id, sala, payload)
 
 
 def tratar_temperatura(doc):
@@ -320,6 +337,8 @@ def tratar_temperatura(doc):
     if valor <= float(setupmaze["normaltemperature"]) and estado["ac_ligado"]:
         registar_atuador(simulacao_id, equipa, "temperatura", comando_ac("AcOff", equipa), payload)
         estado["ac_ligado"] = False
+
+    verificar_scores(simulacao_id, payload, apenas_compressao=True)
     return tem_alerta
 
 
@@ -345,6 +364,7 @@ def tratar_som(doc):
         estado["proxima_atuacao_ruido"] = agora + tempo_min_ruido
         estado["prox_alerta"]["som"] = agora + tempo_min_ruido + threshold * (tempo_max_ruido - tempo_min_ruido)
 
+    verificar_scores(simulacao_id, payload, apenas_compressao=True)
     return tem_alerta
 
 
@@ -362,7 +382,7 @@ def tratar_movimento(doc, emitir_score=True):
         if destino != 0:
             mudar_ocupacao(estado["ocupacao"], destino, grupo, 1)
     if emitir_score:
-        tentar_score_todas_salas(simulacao_id, payload)
+        verificar_scores(simulacao_id, payload, apenas_compressao=False)
 
 
 def worker(simulacao_id):
@@ -433,7 +453,7 @@ def reconstruir_estado(simulacao_id):
 
 
 def recuperar_simulacoes_do_mongo():
-    starts = dados_nao_migrados.find({"tipo": "controlo", "categoria": "start_simulacao"})
+    starts = dados_nao_migrados.find({"tipo": "simulacao", "categoria": "inicio_simulacao"})
     recuperadas = 0
 
     for doc in starts:
