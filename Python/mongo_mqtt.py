@@ -197,12 +197,10 @@ def calcular_tempo_alerta(tipo, valor, simulacao_id):
 
 
 def calcular_tempo_fecho_ruido(valor, simulacao_id):
-    _, _, tempo_min, tempo_max, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
+    _, _, tempo_min, tempo_max, _ = normal_tolerancia_tempos_threshold("som", simulacao_id)
     risco = calcular_risco("som", valor, simulacao_id)
-    if risco >= 1 or threshold >= 1:
-        return tempo_max
-    progresso = (risco - threshold) / (1 - threshold)
-    return max(tempo_min, min(tempo_max, tempo_min + progresso * (tempo_max - tempo_min)))
+    risco = max(0.0, min(1.0, risco))
+    return tempo_min + risco * (tempo_max - tempo_min)
 
 
 def detectar_alerta(tipo, valor, simulacao_id):
@@ -362,8 +360,7 @@ def tratar_som(doc):
         abrir_portas_sem_score(simulacao_id, equipa, payload)
         _, _, tempo_min_ruido, tempo_max_ruido, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
         estado["proxima_atuacao_ruido"] = agora + tempo_min_ruido
-        estado["prox_alerta"]["som"] = agora + tempo_min_ruido + threshold * (tempo_max_ruido - tempo_min_ruido)
-
+        estado["prox_alerta"]["som"] = agora + tempo_min_ruido
     verificar_scores(simulacao_id, payload, apenas_compressao=True)
     return tem_alerta
 

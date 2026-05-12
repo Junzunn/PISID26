@@ -213,7 +213,7 @@ def main():
 
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
 
-    print(f"[gestor PC1] ativo em http://0.0.0.0:{port}, a gerir apenas {SCRIPT}")
+    print(f"[gestor PC1] ativo, NAO ESQUECEM DE EXECUTAR nuvem_mongo.py no PC1 !")
 
     server.serve_forever()
 

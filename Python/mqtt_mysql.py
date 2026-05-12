@@ -17,6 +17,7 @@ MQTT_BROKER = MQTT_CONFIG.get("broker", "broker.emqx.io")
 MQTT_PORT = int(MQTT_CONFIG.get("port", 1883))
 TOPICO_PC1_PC2 = MQTT_CONFIG.get("topic_pc1_pc2", "PC1_PC2")
 READY_INTERVAL = float(MIGRATION_CONFIG.get("ready_interval", 2.0))
+MYSQL_RETRY_INTERVAL = float(MIGRATION_CONFIG.get("mysql_retry_interval", 2.0))
 
 CLIENT_ID = f"mqtt-mysql-{uuid.uuid4().hex[:8]}"
 
@@ -27,6 +28,7 @@ MYSQL = {
     "user": MYSQL_CONFIG.get("user", "software@pisid.pt"),
     "password": MYSQL_CONFIG.get("password", "softwarepisid"),
     "database": MYSQL_CONFIG.get("database", "Marsabirinto"),
+    "charset": MYSQL_CONFIG.get("charset", "utf8mb4"),
 }
 
 filas = {}
@@ -79,8 +81,33 @@ def ligar_mysql():
     return conn, cur
 
 
+def fechar_mysql(conn, cur):
+    try:
+        if cur is not None:
+            cur.close()
+    except Exception:
+        pass
+
+    try:
+        if conn is not None:
+            conn.close()
+    except Exception:
+        pass
+
+
+def ligar_mysql_com_retry(simulacao_id=None, seq=None):
+    while True:
+        try:
+            return ligar_mysql()
+        except mysql.connector.Error as erro:
+            detalhe = ""
+            if simulacao_id is not None and seq is not None:
+                detalhe = f" simulacaoID={simulacao_id} seq={seq}"
+            print(f"[MySQL] indisponivel{detalhe}; nova tentativa em {MYSQL_RETRY_INTERVAL:.1f}s: {erro}")
+            time.sleep(MYSQL_RETRY_INTERVAL)
+
+
 def chamar_sp(conn, cur, nome, args):
-    conn.ping(reconnect=True, attempts=3, delay=2)
     cur.callproc(nome, args)
     conn.commit()
 
@@ -149,14 +176,30 @@ def migrar(conn, cur, doc):
         registar_fim_jogo(conn, cur, sid)
 
 
+def migrar_com_retry(conn, cur, doc):
+    sid = int(doc["simulacaoID"])
+    seq = int(doc["seq"])
+
+    while True:
+        try:
+            migrar(conn, cur, doc)
+            return conn, cur
+
+        except mysql.connector.Error as erro:
+            print(f"[MySQL] falha ao migrar simulacaoID={sid} seq={seq}; documento fica pendente: {erro}")
+            fechar_mysql(conn, cur)
+            conn, cur = ligar_mysql_com_retry(sid, seq)
+
+
 def worker(simulacao_id):
     fila = filas[simulacao_id]
-    conn, cur = ligar_mysql()
+    conn, cur = ligar_mysql_com_retry()
 
     try:
         while True:
             try:
                 seq, mongo_id, doc = fila.get(timeout=0.5)
+
             except Empty:
                 ficou_livre = False
 
@@ -170,16 +213,7 @@ def worker(simulacao_id):
 
                 continue
 
-            while True:
-                try:
-                    migrar(conn, cur, doc)
-                    break
-                except mysql.connector.Error as erro:
-                    print(f"[MySQL retry] simulacaoID={simulacao_id} seq={seq}: {erro}")
-                    cur.close()
-                    conn.close()
-                    time.sleep(2)
-                    conn, cur = ligar_mysql()
+            conn, cur = migrar_com_retry(conn, cur, doc)
 
             publicar({
                 "from": "PC2",
@@ -203,8 +237,7 @@ def worker(simulacao_id):
                 return
 
     finally:
-        cur.close()
-        conn.close()
+        fechar_mysql(conn, cur)
 
 
 def criar_worker(simulacao_id):
@@ -247,13 +280,17 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def on_message(client, userdata, msg):
-    payload = json.loads(msg.payload.decode())
-
-    if payload["from"] == "PC2":
+    try:
+        payload = json.loads(msg.payload.decode())
+    except Exception as erro:
+        print(f"[MQTT ignorado] JSON invalido: {erro}")
         return
 
-    if payload["type"] == "DATA":
-        receber_docs(payload["docs"])
+    if payload.get("from") == "PC2":
+        return
+
+    if payload.get("type") == "DATA":
+        receber_docs(payload.get("docs", []))
 
 
 def main():
