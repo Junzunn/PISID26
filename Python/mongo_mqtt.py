@@ -345,11 +345,24 @@ def tratar_temperatura(doc):
     equipa = get_equipa(simulacao_id)
     valor = float(payload["Temperature"])
     tem_alerta = detectar_alerta("temperatura", valor, simulacao_id)
-    if tem_alerta and not estado["ac_ligado"]:
-        registar_atuador(simulacao_id, equipa, "temperatura", comando_ac("AcOn", equipa), payload)
+    if tem_alerta:
+        registar_atuador(
+            simulacao_id,
+            equipa,
+            "temperatura",
+            comando_ac("AcOn", equipa),
+            payload
+        )
         estado["ac_ligado"] = True
+
     if valor <= float(setupmaze["normaltemperature"]) and estado["ac_ligado"]:
-        registar_atuador(simulacao_id, equipa, "temperatura", comando_ac("AcOff", equipa), payload)
+        registar_atuador(
+            simulacao_id,
+            equipa,
+            "temperatura",
+            comando_ac("AcOff", equipa),
+            payload
+        )
         estado["ac_ligado"] = False
 
     verificar_scores(simulacao_id, payload, apenas_compressao=True)
