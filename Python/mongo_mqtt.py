@@ -171,11 +171,15 @@ def normal_tolerancia_tempos_threshold(tipo, simulacao_id):
         tempo_max = float(params.get("tempo_max_ruido", 20))
         tempo_min = float(params.get("tempo_min_ruido", 2))
         threshold = float(params.get("threshold_ruido", 0.25))
+
     if tempo_min > tempo_max:
         tempo_min, tempo_max = tempo_max, tempo_min
+
     if threshold > 1:
         threshold = threshold / 100
-    return normal, tolerancia, tempo_min, tempo_max, max(0, threshold)
+
+    threshold = max(0.0, min(1.0, threshold))
+    return normal, tolerancia, tempo_min, tempo_max, threshold
 
 
 def calcular_risco(tipo, valor, simulacao_id):
@@ -188,12 +192,11 @@ def calcular_risco(tipo, valor, simulacao_id):
 
 
 def calcular_tempo_alerta(tipo, valor, simulacao_id):
-    _, _, tempo_min, tempo_max, threshold = normal_tolerancia_tempos_threshold(tipo, simulacao_id)
+    _, _, tempo_min, tempo_max, _ = normal_tolerancia_tempos_threshold(tipo, simulacao_id)
     risco = calcular_risco(tipo, valor, simulacao_id)
-    if risco >= 1 or threshold >= 1:
-        return tempo_min
-    progresso = (risco - threshold) / (1 - threshold)
-    return max(tempo_min, min(tempo_max, tempo_max - progresso * (tempo_max - tempo_min)))
+    risco = max(0.0, min(1.0, risco))
+
+    return tempo_max - risco * (tempo_max - tempo_min)
 
 
 def calcular_tempo_fecho_ruido(valor, simulacao_id):
@@ -205,18 +208,31 @@ def calcular_tempo_fecho_ruido(valor, simulacao_id):
 
 def detectar_alerta(tipo, valor, simulacao_id):
     estado = estados[simulacao_id]
-    _, _, _, _, threshold = normal_tolerancia_tempos_threshold(tipo, simulacao_id)
+    _, _, tempo_min, _, threshold = normal_tolerancia_tempos_threshold(tipo, simulacao_id)
     risco = calcular_risco(tipo, valor, simulacao_id)
     agora = time.time()
-    if risco <= 0 or risco < threshold:
+
+    if risco <= 0:
         estado["prox_alerta"][tipo] = 0.0
         return False
-    if agora < estado["prox_alerta"][tipo]:
-        if not (tipo == "som" and risco >= 1):
+
+    if risco < threshold:
+        return False
+
+    proximo_alerta = estado["prox_alerta"][tipo]
+
+    if agora < proximo_alerta:
+        pode_forcar_por_risco_maximo = risco >= 1.0 and (proximo_alerta - agora) > tempo_min
+        if not pode_forcar_por_risco_maximo:
             return False
-    tempo_espera = calcular_tempo_alerta(tipo, valor, simulacao_id)
+
+    tempo_espera = tempo_min if risco >= 1.0 else calcular_tempo_alerta(tipo, valor, simulacao_id)
     estado["prox_alerta"][tipo] = agora + tempo_espera
-    print(f"[alerta] simulacaoID={simulacao_id} tipo={tipo} valor={valor} risco={risco:.2f} espera={tempo_espera:.1f}s")
+
+    print(
+        f"[alerta] simulacaoID={simulacao_id} tipo={tipo} "
+        f"valor={valor} risco={risco:.2f} espera={tempo_espera:.1f}s"
+    )
     return True
 
 
@@ -350,17 +366,36 @@ def tratar_som(doc):
     tem_alerta = detectar_alerta("som", valor, simulacao_id)
 
     normalnoise = float(setupmaze["normalnoise"])
+    risco = calcular_risco("som", valor, simulacao_id)
+    _, _, tempo_min_ruido, _, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
+    limiar_abertura = threshold / 2
 
     if tem_alerta and not estado["ruido_global_fechado"]:
-        registar_atuador(simulacao_id, equipa, "porta_ruido_global", comando_all_door("CloseAllDoor", equipa), payload)
+        registar_atuador(
+            simulacao_id,
+            equipa,
+            "porta_ruido_global",
+            comando_all_door("CloseAllDoor", equipa),
+            payload,
+        )
         estado["ruido_global_fechado"] = True
         estado["proxima_atuacao_ruido"] = agora + calcular_tempo_fecho_ruido(valor, simulacao_id)
 
-    elif estado["ruido_global_fechado"] and (valor <= normalnoise or agora >= estado["proxima_atuacao_ruido"]):
-        abrir_portas_sem_score(simulacao_id, equipa, payload)
-        _, _, tempo_min_ruido, tempo_max_ruido, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
-        estado["proxima_atuacao_ruido"] = agora + tempo_min_ruido
-        estado["prox_alerta"]["som"] = agora + tempo_min_ruido
+    elif estado["ruido_global_fechado"]:
+        pode_abrir_por_normal = valor <= normalnoise
+        pode_abrir_por_histerese = (
+            agora >= estado["proxima_atuacao_ruido"]
+            and risco <= limiar_abertura
+        )
+
+        if pode_abrir_por_normal or pode_abrir_por_histerese:
+            abrir_portas_sem_score(simulacao_id, equipa, payload)
+            estado["proxima_atuacao_ruido"] = agora + tempo_min_ruido
+            estado["prox_alerta"]["som"] = agora + tempo_min_ruido
+
+        elif agora >= estado["proxima_atuacao_ruido"]:
+            estado["proxima_atuacao_ruido"] = agora + tempo_min_ruido
+
     verificar_scores(simulacao_id, payload, apenas_compressao=True)
     return tem_alerta
 
