@@ -175,10 +175,9 @@ def normal_tolerancia_tempos_threshold(tipo, simulacao_id):
     if tempo_min > tempo_max:
         tempo_min, tempo_max = tempo_max, tempo_min
 
-    if threshold > 1:
-        threshold = threshold / 100
+    if threshold < 0:
+        threshold = 0
 
-    threshold = max(0.0, min(1.0, threshold))
     return normal, tolerancia, tempo_min, tempo_max, threshold
 
 
@@ -208,7 +207,7 @@ def calcular_tempo_fecho_ruido(valor, simulacao_id):
 
 def detectar_alerta(tipo, valor, simulacao_id):
     estado = estados[simulacao_id]
-    _, _, tempo_min, _, threshold = normal_tolerancia_tempos_threshold(tipo, simulacao_id)
+    _, _, _, _, threshold = normal_tolerancia_tempos_threshold(tipo, simulacao_id)
     risco = calcular_risco(tipo, valor, simulacao_id)
     agora = time.time()
 
@@ -219,14 +218,10 @@ def detectar_alerta(tipo, valor, simulacao_id):
     if risco < threshold:
         return False
 
-    proximo_alerta = estado["prox_alerta"][tipo]
+    if agora < estado["prox_alerta"][tipo]:
+        return False
 
-    if agora < proximo_alerta:
-        pode_forcar_por_risco_maximo = risco >= 1.0 and (proximo_alerta - agora) > tempo_min
-        if not pode_forcar_por_risco_maximo:
-            return False
-
-    tempo_espera = tempo_min if risco >= 1.0 else calcular_tempo_alerta(tipo, valor, simulacao_id)
+    tempo_espera = calcular_tempo_alerta(tipo, valor, simulacao_id)
     estado["prox_alerta"][tipo] = agora + tempo_espera
 
     print(

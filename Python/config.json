@@ -17,7 +17,7 @@
     "database": "Marsabirinto"
   },
   "mysql": {
-    "host": "192.168.1.228",
+    "host": "10.192.4.194",
     "port": 3306,
     "user": "software@pisid.pt",
     "password": "softwarepisid",
@@ -31,9 +31,9 @@
     "ready_interval": 2.0
   },
   "manager": {
-    "pc1_host": "192.168.1.228",
+    "pc1_host": "10.192.4.194",
     "pc1_port": 8081,
-    "pc2_host": "192.168.1.228",
+    "pc2_host": "10.192.4.194",
     "pc2_port": 8082
   }
 }
