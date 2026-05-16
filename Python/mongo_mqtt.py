@@ -218,16 +218,19 @@ def detectar_alerta(tipo, valor, simulacao_id):
     if risco < threshold:
         return False
 
-    if agora < estado["prox_alerta"][tipo]:
+    tempo_espera = calcular_tempo_alerta(tipo, valor, simulacao_id)
+    novo_prox_alerta = agora + tempo_espera
+    proximo_alerta = estado["prox_alerta"][tipo]
+
+    if agora < proximo_alerta:
+        if novo_prox_alerta < proximo_alerta:
+            estado["prox_alerta"][tipo] = novo_prox_alerta
         return False
 
-    tempo_espera = calcular_tempo_alerta(tipo, valor, simulacao_id)
-    estado["prox_alerta"][tipo] = agora + tempo_espera
+    estado["prox_alerta"][tipo] = novo_prox_alerta
 
-    print(
-        f"[alerta] simulacaoID={simulacao_id} tipo={tipo} "
-        f"valor={valor} risco={risco:.2f} espera={tempo_espera:.1f}s"
-    )
+    print(f"[alerta] simulacaoID={simulacao_id} tipo={tipo} "
+          f"valor={valor} risco={risco:.2f} espera={tempo_espera:.1f}s")
     return True
 
 
@@ -375,8 +378,7 @@ def tratar_som(doc):
 
     normalnoise = float(setupmaze["normalnoise"])
     risco = calcular_risco("som", valor, simulacao_id)
-    _, _, tempo_min_ruido, _, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
-    limiar_abertura = threshold / 2
+    _, _, _, _, threshold = normal_tolerancia_tempos_threshold("som", simulacao_id)
 
     if tem_alerta and not estado["ruido_global_fechado"]:
         registar_atuador(
@@ -391,18 +393,16 @@ def tratar_som(doc):
 
     elif estado["ruido_global_fechado"]:
         pode_abrir_por_normal = valor <= normalnoise
-        pode_abrir_por_histerese = (
-            agora >= estado["proxima_atuacao_ruido"]
-            and risco <= limiar_abertura
-        )
+        pode_abrir_por_tempo = agora >= estado["proxima_atuacao_ruido"]
 
-        if pode_abrir_por_normal or pode_abrir_por_histerese:
+        if pode_abrir_por_normal or pode_abrir_por_tempo:
             abrir_portas_sem_score(simulacao_id, equipa, payload)
-            estado["proxima_atuacao_ruido"] = agora + tempo_min_ruido
-            estado["prox_alerta"]["som"] = agora + tempo_min_ruido
+            estado["proxima_atuacao_ruido"] = 0.0
 
-        elif agora >= estado["proxima_atuacao_ruido"]:
-            estado["proxima_atuacao_ruido"] = agora + tempo_min_ruido
+            if risco >= threshold:
+                estado["prox_alerta"]["som"] = agora + calcular_tempo_alerta("som", valor, simulacao_id)
+            else:
+                estado["prox_alerta"]["som"] = 0.0
 
     verificar_scores(simulacao_id, payload, apenas_compressao=True)
     return tem_alerta
