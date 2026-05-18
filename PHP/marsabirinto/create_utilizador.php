@@ -18,7 +18,7 @@ try {
     $equipa = nullable_int_from_post('equipa');
     $password = $_POST['password'] ?? '';
 
-    if ($tipo === null || !in_array($tipo, ['AdminApp', 'Equipe', 'Analista', 'Software'], true)) {
+    if ($tipo === null || !in_array($tipo, ['AdminApp', 'Equipe', 'Software'], true)) {
         throw new RuntimeException('Tipo invalido.');
     }
 

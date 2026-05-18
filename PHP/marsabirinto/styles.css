@@ -220,3 +220,56 @@ td {
     gap: 8px;
     align-items: center;
 }
+
+.inline-check {
+    flex-direction: row;
+    align-items: center;
+    font-weight: normal;
+}
+
+.inline-check input {
+    width: auto;
+}
+
+
+.status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 18px;
+    margin: 18px 0 24px;
+}
+
+.status-card {
+    background: #ffffff;
+    border: 1px solid #d8e2ef;
+    border-radius: 14px;
+    padding: 18px;
+    box-shadow: 0 8px 20px rgba(20, 38, 70, 0.08);
+}
+
+.status-card h2 {
+    margin-top: 0;
+    font-size: 20px;
+}
+
+.semaforo {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: middle;
+    border: 1px solid rgba(0, 0, 0, 0.18);
+}
+
+.semaforo.ok {
+    background: #18a957;
+}
+
+.semaforo.warn {
+    background: #f4bf42;
+}
+
+.semaforo.erro {
+    background: #d64545;
+}

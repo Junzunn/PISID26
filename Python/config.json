@@ -1,0 +1,46 @@
+{
+  "mqtt": {
+    "broker": "broker.emqx.io",
+    "port": 1883,
+    "topic_php": "msgPHP",
+    "topic_pc1_pc2": "PC1_PC2",
+    "topic_atuador": "pisid_mazeact",
+    "topic_sensores_base": [
+      "pisid_mazemov",
+      "pisid_mazetemp",
+      "pisid_mazesound"
+    ]
+  },
+  "maze_db": {
+    "host": "194.210.86.10",
+    "user": "aluno",
+    "password": "aluno",
+    "database": "maze"
+  },
+  "mongo": {
+    "uri": "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=rs0&retryWrites=true&serverSelectionTimeoutMS=200&connectTimeoutMS=1000",
+    "database": "Marsabirinto"
+  },
+  "mysql": {
+    "host": "192.168.1.228",
+    "port": 3306,
+    "user": "software@pisid.pt",
+    "password": "softwarepisid",
+    "database": "Marsabirinto",
+    "charset": "utf8mb4"
+  },
+  "migration": {
+    "batch_size": 200,
+    "mongo_scan_interval": 0.1,
+    "min_send_interval": 0.2,
+    "ready_interval": 2.0
+  },
+  "manager": {
+    "pc1_host": "192.168.1.228",
+    "pc1_port": 8081,
+    "pc2_host": "192.168.1.228",
+    "pc2_port": 8082,
+    "pc1_nuvem_port": 8083,
+    "pc1_nuvem_host": "192.168.1.228"
+  }
+}

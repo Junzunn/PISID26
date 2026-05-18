@@ -6,48 +6,73 @@ from queue import PriorityQueue, Empty
 
 import mysql.connector
 import paho.mqtt.client as mqtt
+from config_loader import load_config
 
 
-MQTT_BROKER = "broker.emqx.io"
-MQTT_PORT = 1883
-TOPICO_PC1_PC2 = "PC1_PC2"
+CONFIG = load_config()
+MQTT_CONFIG = CONFIG.get("mqtt", {})
+MIGRATION_CONFIG = CONFIG.get("migration", {})
+
+MQTT_BROKER = MQTT_CONFIG.get("broker", "broker.emqx.io")
+MQTT_PORT = int(MQTT_CONFIG.get("port", 1883))
+TOPICO_PC1_PC2 = MQTT_CONFIG.get("topic_pc1_pc2", "PC1_PC2")
+READY_INTERVAL = float(MIGRATION_CONFIG.get("ready_interval", 2.0))
+MYSQL_RETRY_INTERVAL = float(MIGRATION_CONFIG.get("mysql_retry_interval", 2.0))
 
 CLIENT_ID = f"mqtt-mysql-{uuid.uuid4().hex[:8]}"
 
+MYSQL_CONFIG = CONFIG.get("mysql", {})
 MYSQL = {
-    "host": "localhost",
-    "user": "software@pisid.pt",
-    "password": "softwarepisid",
-    "database": "Marsabirinto",
+    "host": MYSQL_CONFIG.get("host", "127.0.0.1"),
+    "port": int(MYSQL_CONFIG.get("port", 3306)),
+    "user": MYSQL_CONFIG.get("user", "software@pisid.pt"),
+    "password": MYSQL_CONFIG.get("password", "softwarepisid"),
+    "database": MYSQL_CONFIG.get("database", "Marsabirinto"),
+    "charset": MYSQL_CONFIG.get("charset", "utf8mb4"),
 }
 
 filas = {}
 ids_em_fila = set()
 simulacoes_ocupadas = set()
+ultimo_ready = 0.0
 
 lock = threading.Lock()
-
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
 
 
 def publicar(payload):
     msg = json.dumps(payload, ensure_ascii=False)
     mqtt_client.publish(TOPICO_PC1_PC2, msg, qos=1).wait_for_publish()
-    #print(f"[MQTT OUT] {msg}")
+    print(f"[MQTT OUT] {msg}")
+
+
+def publicar_ready(forcar=False):
+    global ultimo_ready
+
+    agora = time.time()
+
+    with lock:
+        if simulacoes_ocupadas:
+            return
+
+        if not forcar and agora - ultimo_ready < READY_INTERVAL:
+            return
+
+        ultimo_ready = agora
+
+    publicar({
+        "from": "PC2",
+        "type": "READY",
+        "busy": [],
+    })
 
 
 def ready_loop():
+    publicar_ready(forcar=True)
+
     while True:
-        with lock:
-            busy = sorted(simulacoes_ocupadas)
-
-        publicar({
-            "from": "PC2",
-            "type": "READY",
-            "busy": busy,
-        })
-
-        time.sleep(1.5)
+        time.sleep(0.2)
+        publicar_ready()
 
 
 def ligar_mysql():
@@ -56,8 +81,33 @@ def ligar_mysql():
     return conn, cur
 
 
+def fechar_mysql(conn, cur):
+    try:
+        if cur is not None:
+            cur.close()
+    except Exception:
+        pass
+
+    try:
+        if conn is not None:
+            conn.close()
+    except Exception:
+        pass
+
+
+def ligar_mysql_com_retry(simulacao_id=None, seq=None):
+    while True:
+        try:
+            return ligar_mysql()
+        except mysql.connector.Error as erro:
+            detalhe = ""
+            if simulacao_id is not None and seq is not None:
+                detalhe = f" simulacaoID={simulacao_id} seq={seq}"
+            print(f"[MySQL] indisponivel{detalhe}; nova tentativa em {MYSQL_RETRY_INTERVAL:.1f}s: {erro}")
+            time.sleep(MYSQL_RETRY_INTERVAL)
+
+
 def chamar_sp(conn, cur, nome, args):
-    conn.ping(reconnect=True, attempts=3, delay=2)
     cur.callproc(nome, args)
     conn.commit()
 
@@ -69,9 +119,10 @@ def hora(doc):
 def registar_fim_jogo(conn, cur, simulacao_id):
     try:
         chamar_sp(conn, cur, "simulacao_registar_fim", [simulacao_id])
-    except mysql.connector.Error as e:
-        if "ja foi registado" not in str(e):
+    except mysql.connector.Error as erro:
+        if "ja foi registado" not in str(erro):
             raise
+
 
 def migrar(conn, cur, doc):
     sid = int(doc["simulacaoID"])
@@ -125,30 +176,44 @@ def migrar(conn, cur, doc):
         registar_fim_jogo(conn, cur, sid)
 
 
+def migrar_com_retry(conn, cur, doc):
+    sid = int(doc["simulacaoID"])
+    seq = int(doc["seq"])
+
+    while True:
+        try:
+            migrar(conn, cur, doc)
+            return conn, cur
+
+        except mysql.connector.Error as erro:
+            print(f"[MySQL] falha ao migrar simulacaoID={sid} seq={seq}; documento fica pendente: {erro}")
+            fechar_mysql(conn, cur)
+            conn, cur = ligar_mysql_com_retry(sid, seq)
+
+
 def worker(simulacao_id):
     fila = filas[simulacao_id]
-    conn, cur = ligar_mysql()
+    conn, cur = ligar_mysql_com_retry()
 
     try:
         while True:
             try:
                 seq, mongo_id, doc = fila.get(timeout=0.5)
+
             except Empty:
+                ficou_livre = False
+
                 with lock:
-                    if fila.empty():
+                    if fila.empty() and simulacao_id in simulacoes_ocupadas:
                         simulacoes_ocupadas.discard(simulacao_id)
+                        ficou_livre = True
+
+                if ficou_livre:
+                    publicar_ready(forcar=True)
+
                 continue
 
-            while True:
-                try:
-                    migrar(conn, cur, doc)
-                    break
-                except mysql.connector.Error as e:
-                    print(f"[MySQL retry] simulacaoID={simulacao_id} seq={seq}: {e}")
-                    cur.close()
-                    conn.close()
-                    time.sleep(2)
-                    conn, cur = ligar_mysql()
+            conn, cur = migrar_com_retry(conn, cur, doc)
 
             publicar({
                 "from": "PC2",
@@ -168,11 +233,11 @@ def worker(simulacao_id):
                     simulacoes_ocupadas.discard(simulacao_id)
 
                 print(f"[cleanup] mqtt_mysql simulacaoID={simulacao_id}")
+                publicar_ready(forcar=True)
                 return
 
     finally:
-        cur.close()
-        conn.close()
+        fechar_mysql(conn, cur)
 
 
 def criar_worker(simulacao_id):
@@ -181,16 +246,17 @@ def criar_worker(simulacao_id):
 
     filas[simulacao_id] = PriorityQueue()
 
-    thread = threading.Thread(
+    threading.Thread(
         target=worker,
         args=(simulacao_id,),
         daemon=True,
         name=f"mysql_worker_{simulacao_id}",
-    )
-    thread.start()
+    ).start()
 
 
 def receber_docs(docs):
+    recebidos = 0
+
     with lock:
         for doc in docs:
             sid = int(doc["simulacaoID"])
@@ -203,8 +269,9 @@ def receber_docs(docs):
             ids_em_fila.add(mongo_id)
             simulacoes_ocupadas.add(sid)
             filas[sid].put((int(doc["seq"]), mongo_id, doc))
+            recebidos += 1
 
-    print(f"[DATA] recebidos {len(docs)} docs")
+    print(f"[DATA] recebidos {len(docs)} docs, aceites {recebidos}")
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
@@ -213,13 +280,17 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def on_message(client, userdata, msg):
-    payload = json.loads(msg.payload.decode())
-
-    if payload["from"] == "PC2":
+    try:
+        payload = json.loads(msg.payload.decode())
+    except Exception as erro:
+        print(f"[MQTT ignorado] JSON invalido: {erro}")
         return
 
-    if payload["type"] == "DATA":
-        receber_docs(payload["docs"])
+    if payload.get("from") == "PC2":
+        return
+
+    if payload.get("type") == "DATA":
+        receber_docs(payload.get("docs", []))
 
 
 def main():

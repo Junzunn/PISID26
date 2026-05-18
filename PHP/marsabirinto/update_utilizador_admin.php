@@ -23,7 +23,7 @@ try {
     $datanascimento = nullable_string_from_post('datanascimento');
     $equipa = nullable_int_from_post('equipa');
 
-    if ($tipo !== null && !in_array($tipo, ['AdminApp', 'Equipe', 'Analista', 'Software'], true)) {
+    if ($tipo !== null && !in_array($tipo, ['AdminApp', 'Equipe', 'Software'], true)) {
         throw new RuntimeException('Tipo invalido.');
     }
 

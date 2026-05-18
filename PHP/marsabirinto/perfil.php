@@ -83,11 +83,6 @@ if (!$user || $user['Tipo'] === 'root') {
             <span class="hint" id="perfil_datanascimento_hint"></span>
         </label>
 
-        <label>
-            Equipa
-            <input type="number" name="equipa" id="perfil_equipa" min="1">
-        </label>
-
         <div class="dialog-actions">
             <button type="button" onclick="document.getElementById('editarPerfilDialog').close()">
                 Cancelar
@@ -111,9 +106,6 @@ if (!$user || $user['Tipo'] === 'root') {
         document.getElementById('perfil_datanascimento').value = '';
         document.getElementById('perfil_datanascimento_hint').textContent =
             user.DataNascimento ? 'Atual: ' + user.DataNascimento : 'Atual: vazio';
-
-        document.getElementById('perfil_equipa').value = '';
-        document.getElementById('perfil_equipa').placeholder = user.Equipa ?? '';
 
         document.getElementById('editarPerfilDialog').showModal();
     }

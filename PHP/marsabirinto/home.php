@@ -46,6 +46,9 @@ $isEquipe = $user && $user['Tipo'] === 'Equipe';
             <a class="menu-card" href="utilizadores.php">
                 Gestao de Utilizadores
             </a>
+            <a class="menu-card" href="estado_migracao.php">
+                Estado da Migracao
+            </a>
         <?php endif; ?>
     </div>
 </div>

@@ -91,12 +91,12 @@ try {
         'variacao_outlier' => (float)$simulacao['variacao_outlier'],
     ];
 
-    publicar_inicio_simulacao($payload);
-
     $stmt = $pdo->prepare('CALL simulacao_iniciar(:id)');
     $stmt->bindValue(':id', $idSimulacao, PDO::PARAM_INT);
     $stmt->execute();
     $stmt->closeCursor();
+
+    publicar_inicio_simulacao($payload);
 
     set_flash('success', 'Mensagem MQTT enviada e simulacao iniciada.');
     redirect('simulacoes.php');
