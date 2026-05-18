@@ -21,7 +21,10 @@ MQTT_CONFIG = CONFIG.get("mqtt", {})
 MQTT_BROKER = MQTT_CONFIG.get("broker", "broker.emqx.io")
 MQTT_PORT = int(MQTT_CONFIG.get("port", 1883))
 TOPICO_PHP = MQTT_CONFIG.get("topic_php", "msgPHP")
-TOPICOS_SENSORES_BASE = ["pisid_mazemov", "pisid_mazetemp", "pisid_mazesound"]
+TOPICOS_SENSORES_BASE = MQTT_CONFIG.get(
+    "topic_sensores_base",
+    ["pisid_mazemov", "pisid_mazetemp", "pisid_mazesound"]
+)
 CLIENT_ID = f"nuvem-mongo-{uuid.uuid4().hex[:8]}"
 
 MAZE_DB_CONFIG = CONFIG.get("maze_db", {
