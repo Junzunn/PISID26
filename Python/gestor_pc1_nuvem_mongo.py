@@ -141,12 +141,6 @@ def _terminar_pid(pid, motivo, timeout=3.0):
 
 
 def limpar_processos_antigos_nuvem():
-    """Kill old unmanaged nuvem_mongo.py and mazerun before this gestor starts its managed copy.
-
-    This is intentional: a manually started nuvem_mongo.py cannot be fully adopted by
-    subprocess.Popen, and its stdout cannot be redirected to the gestor log after the fact.
-    Killing it first prevents duplicate MQTT Start subscriptions and duplicate mazerun runs.
-    """
     processo_atual = PROCESSO.pid if PROCESSO is not None and PROCESSO.poll() is None else None
 
     for pid in _pgrep("nuvem_mongo.py"):
@@ -158,8 +152,6 @@ def limpar_processos_antigos_nuvem():
         if "nuvem_mongo.py" in cmd:
             _terminar_pid(pid, "nuvem_mongo.py antigo")
 
-    # If an old nuvem_mongo was killed, its mazerun child may be orphaned.
-    # Remove old mazerun too, otherwise the next Start can produce duplicated game output.
     for pid in _pgrep("mazerun"):
         if pid == os.getpid():
             continue
@@ -167,7 +159,6 @@ def limpar_processos_antigos_nuvem():
         if "mazerun" in cmd and "grep" not in cmd:
             _terminar_pid(pid, "mazerun antigo/orfao")
 
-    # Remove stale runtime locks. The new process will recreate fresh locks.
     try:
         for lock_file in RUNTIME_DIR.glob("nuvem_mongo*.lock"):
             old_pid = _ler_primeiro_pid(lock_file)

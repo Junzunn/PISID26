@@ -112,8 +112,6 @@ def reiniciar_processo():
 
 
 def monitor_loop():
-    # Este gestor gere apenas o mongo_mqtt.py.
-    # O nuvem_mongo.py continua a ser iniciado pelo fluxo da simulação/mazerun.
     iniciar_processo()
     while True:
         if not processo_ok():
