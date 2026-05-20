@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 import signal
@@ -5,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from pymongo import MongoClient
@@ -20,7 +22,169 @@ CONFIG = load_config()
 MANAGER = CONFIG.get("manager", {})
 PEDIDOS_TRATADOS = set()
 PROCESSO = None
+LOG_HANDLE = None
 PROCESSO_LOCK = threading.Lock()
+LOG_DIR = BASE_DIR / "logs"
+LOG_PATH = LOG_DIR / f"{SCRIPT}.log"
+
+
+RUNTIME_DIR = BASE_DIR / "runtime"
+GESTOR_LOCK_PATH = RUNTIME_DIR / "gestor_pc1_nuvem_mongo.lock"
+GESTOR_LOCK_FD = None
+
+
+def _pid_ativo(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _ler_primeiro_pid(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            linha = f.readline().strip()
+        return int(linha) if linha else None
+    except Exception:
+        return None
+
+
+def adquirir_lock_gestor():
+    global GESTOR_LOCK_FD
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            GESTOR_LOCK_FD = os.open(str(GESTOR_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
+            os.write(GESTOR_LOCK_FD, f"{os.getpid()}\nstarted_at={datetime.now().isoformat()}\n".encode("utf-8"))
+            return
+        except FileExistsError:
+            pid = _ler_primeiro_pid(GESTOR_LOCK_PATH)
+            if pid and _pid_ativo(pid):
+                print(f"[gestor PC1 nuvem] ja existe outro gestor ativo pid={pid}; este gestor vai sair", flush=True)
+                sys.exit(0)
+            try:
+                GESTOR_LOCK_PATH.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def libertar_lock_gestor():
+    global GESTOR_LOCK_FD
+    try:
+        if GESTOR_LOCK_FD is not None:
+            os.close(GESTOR_LOCK_FD)
+    except OSError:
+        pass
+    GESTOR_LOCK_FD = None
+    try:
+        GESTOR_LOCK_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _command_of_pid(pid):
+    if os.name == "nt":
+        return ""
+    try:
+        r = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=1)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _pgrep(pattern):
+    if os.name == "nt":
+        return []
+    try:
+        r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, timeout=2)
+    except Exception:
+        return []
+    pids = []
+    for linha in r.stdout.splitlines():
+        try:
+            pids.append(int(linha.strip()))
+        except ValueError:
+            pass
+    return pids
+
+
+def _terminar_pid(pid, motivo, timeout=3.0):
+    if pid == os.getpid() or not _pid_ativo(pid):
+        return
+    print(f"[gestor PC1 nuvem] a terminar processo antigo pid={pid} ({motivo})", flush=True)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception as erro:
+        print(f"[gestor PC1 nuvem] nao foi possivel enviar SIGTERM pid={pid}: {erro}", flush=True)
+        return
+
+    limite = time.time() + timeout
+    while time.time() < limite:
+        if not _pid_ativo(pid):
+            return
+        time.sleep(0.1)
+
+    if _pid_ativo(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception as erro:
+            print(f"[gestor PC1 nuvem] nao foi possivel enviar SIGKILL pid={pid}: {erro}", flush=True)
+
+
+def limpar_processos_antigos_nuvem():
+    """Kill old unmanaged nuvem_mongo.py and mazerun before this gestor starts its managed copy.
+
+    This is intentional: a manually started nuvem_mongo.py cannot be fully adopted by
+    subprocess.Popen, and its stdout cannot be redirected to the gestor log after the fact.
+    Killing it first prevents duplicate MQTT Start subscriptions and duplicate mazerun runs.
+    """
+    processo_atual = PROCESSO.pid if PROCESSO is not None and PROCESSO.poll() is None else None
+
+    for pid in _pgrep("nuvem_mongo.py"):
+        if pid in {os.getpid(), processo_atual}:
+            continue
+        cmd = _command_of_pid(pid)
+        if "gestor_pc1_nuvem_mongo.py" in cmd:
+            continue
+        if "nuvem_mongo.py" in cmd:
+            _terminar_pid(pid, "nuvem_mongo.py antigo")
+
+    # If an old nuvem_mongo was killed, its mazerun child may be orphaned.
+    # Remove old mazerun too, otherwise the next Start can produce duplicated game output.
+    for pid in _pgrep("mazerun"):
+        if pid == os.getpid():
+            continue
+        cmd = _command_of_pid(pid)
+        if "mazerun" in cmd and "grep" not in cmd:
+            _terminar_pid(pid, "mazerun antigo/orfao")
+
+    # Remove stale runtime locks. The new process will recreate fresh locks.
+    try:
+        for lock_file in RUNTIME_DIR.glob("nuvem_mongo*.lock"):
+            old_pid = _ler_primeiro_pid(lock_file)
+            if not old_pid or not _pid_ativo(old_pid):
+                try:
+                    lock_file.unlink()
+                except FileNotFoundError:
+                    pass
+        for lock_file in RUNTIME_DIR.glob("mazerun_*.lock"):
+            old_pid = _ler_primeiro_pid(lock_file)
+            if not old_pid or not _pid_ativo(old_pid):
+                try:
+                    lock_file.unlink()
+                except FileNotFoundError:
+                    pass
+    except Exception:
+        pass
 
 
 def abrir_mongo():
@@ -39,23 +203,69 @@ def estado_mongo():
         return "ERRO", f"{type(erro).__name__}: {erro}"
 
 
+def fechar_log_handle():
+    global LOG_HANDLE
+
+    if LOG_HANDLE is None:
+        return
+
+    try:
+        LOG_HANDLE.flush()
+        LOG_HANDLE.close()
+    except Exception:
+        pass
+    finally:
+        LOG_HANDLE = None
+
+
+def abrir_log_processo():
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
+    log_file.write("\n==============================\n")
+    log_file.write(f"Start: {datetime.now().isoformat()}\n")
+    log_file.write(f"Command: {sys.executable} -u {BASE_DIR / SCRIPT}\n")
+    log_file.write("==============================\n")
+    log_file.flush()
+    return log_file
+
+
 def iniciar_processo():
-    global PROCESSO
+    global PROCESSO, LOG_HANDLE
 
     with PROCESSO_LOCK:
         if PROCESSO is not None and PROCESSO.poll() is None:
             return False
 
-        kwargs = {"cwd": str(BASE_DIR)}
+        limpar_processos_antigos_nuvem()
+
+        fechar_log_handle()
+        LOG_HANDLE = abrir_log_processo()
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+
+        kwargs = {
+            "cwd": str(BASE_DIR),
+            "stdout": LOG_HANDLE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "bufsize": 1,
+            "env": env,
+        }
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
 
         PROCESSO = subprocess.Popen(
-            [sys.executable, str(BASE_DIR / SCRIPT)],
+            [sys.executable, "-u", str(BASE_DIR / SCRIPT)],
             **kwargs,
         )
+
+        LOG_HANDLE.write(f"PID: {PROCESSO.pid}\n")
+        LOG_HANDLE.flush()
+        print(f"[gestor PC1 nuvem] log do processo: {LOG_PATH}", flush=True)
         return True
 
 
@@ -64,6 +274,7 @@ def parar_processo():
 
     with PROCESSO_LOCK:
         if PROCESSO is None or PROCESSO.poll() is not None:
+            fechar_log_handle()
             return
 
         if os.name == "nt":
@@ -85,6 +296,8 @@ def parar_processo():
                 except ProcessLookupError:
                     pass
             PROCESSO.wait(timeout=5)
+        finally:
+            fechar_log_handle()
 
 
 def processo_ok():
@@ -179,6 +392,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    adquirir_lock_gestor()
+    atexit.register(libertar_lock_gestor)
     port = int(MANAGER.get(PORT_KEY, DEFAULT_PORT))
     threading.Thread(target=monitor_loop, daemon=True).start()
 

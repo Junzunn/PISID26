@@ -1,0 +1,22 @@
+{
+  "mqtt": {
+    "broker": "broker.emqx.io",
+    "port": 1883,
+    "topic_pc1_pc2": "PC1_PC2"
+  },
+  "mysql": {
+    "host": "192.168.1.230",
+    "port": 3306,
+    "user": "software@pisid.pt",
+    "password": "softwarepisid",
+    "database": "Marsabirinto",
+    "charset": "utf8mb4"
+  },
+  "migration": {
+    "ready_interval": 2.0,
+    "mysql_retry_interval": 2.0
+  },
+  "manager": {
+    "pc2_port": 8082
+  }
+}

@@ -1,8 +1,10 @@
 import json
+import os
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from pymongo import MongoClient
@@ -19,29 +21,84 @@ CONFIG = load_config()
 MANAGER = CONFIG.get("manager", {})
 PEDIDOS_TRATADOS = set()
 PROCESSO = None
+LOG_HANDLE = None
 PROCESSO_LOCK = threading.Lock()
+LOG_DIR = BASE_DIR / "logs"
+LOG_PATH = LOG_DIR / f"{SCRIPT}.log"
+
+
+def fechar_log_handle():
+    global LOG_HANDLE
+
+    if LOG_HANDLE is None:
+        return
+
+    try:
+        LOG_HANDLE.flush()
+        LOG_HANDLE.close()
+    except Exception:
+        pass
+    finally:
+        LOG_HANDLE = None
+
+
+def abrir_log_processo():
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
+    log_file.write("\n==============================\n")
+    log_file.write(f"Start: {datetime.now().isoformat()}\n")
+    log_file.write(f"Command: {sys.executable} -u {BASE_DIR / SCRIPT}\n")
+    log_file.write("==============================\n")
+    log_file.flush()
+    return log_file
 
 
 def iniciar_processo():
-    global PROCESSO
+    global PROCESSO, LOG_HANDLE
+
     with PROCESSO_LOCK:
         if PROCESSO is not None and PROCESSO.poll() is None:
             return False
-        PROCESSO = subprocess.Popen([sys.executable, str(BASE_DIR / SCRIPT)], cwd=str(BASE_DIR))
+
+        fechar_log_handle()
+        LOG_HANDLE = abrir_log_processo()
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+
+        PROCESSO = subprocess.Popen(
+            [sys.executable, "-u", str(BASE_DIR / SCRIPT)],
+            cwd=str(BASE_DIR),
+            stdout=LOG_HANDLE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+
+        LOG_HANDLE.write(f"PID: {PROCESSO.pid}\n")
+        LOG_HANDLE.flush()
+        print(f"[gestor PC1] log do processo: {LOG_PATH}", flush=True)
         return True
 
 
 def parar_processo():
     global PROCESSO
+
     with PROCESSO_LOCK:
         if PROCESSO is None or PROCESSO.poll() is not None:
+            fechar_log_handle()
             return
+
         PROCESSO.terminate()
         try:
             PROCESSO.wait(timeout=5)
         except subprocess.TimeoutExpired:
             PROCESSO.kill()
             PROCESSO.wait(timeout=5)
+        finally:
+            fechar_log_handle()
 
 
 def processo_ok():

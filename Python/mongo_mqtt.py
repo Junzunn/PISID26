@@ -27,7 +27,7 @@ MAZE_DB = CONFIG.get("maze_db", {"host": "194.210.86.10", "user": "aluno", "pass
 MONGO_CONFIG = CONFIG.get("mongo", {})
 MONGO_URI = MONGO_CONFIG.get("uri", "mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=rs0")
 MONGO_DB = MONGO_CONFIG.get("database", "Marsabirinto")
-BATCH_SIZE = int(MIGRATION_CONFIG.get("batch_size", 200))
+BATCH_SIZE = int(MIGRATION_CONFIG.get("batch_size", 6767))
 intervalo_min_envio = float(MIGRATION_CONFIG.get("min_send_interval", 0.2))
 mongo_scan_interval = float(MIGRATION_CONFIG.get("mongo_scan_interval", 0.1))
 
@@ -266,7 +266,8 @@ def controlar_portas_score(simulacao_id, equipa, sala, payload, fechar):
         else:
             estado["portas_score_fechadas"].discard(porta)
             tipo_porta = "OpenDoor"
-        registar_atuador(simulacao_id, equipa, "porta_score", comando_porta(tipo_porta, equipa, origem, destino), payload, enviar=not estado["ruido_global_fechado"])
+        registar_atuador(simulacao_id, equipa, "porta_score",
+                         comando_porta(tipo_porta, equipa, origem, destino), payload, enviar=not estado["ruido_global_fechado"])
 
 
 def abrir_portas_sem_score(simulacao_id, equipa, payload):
@@ -275,7 +276,7 @@ def abrir_portas_sem_score(simulacao_id, equipa, payload):
     registar_atuador(
         simulacao_id,
         equipa,
-        "porta_ruido_global",
+        "ruido",
         comando_all_door("OpenAllDoor", equipa),
         payload,
     )
@@ -384,7 +385,7 @@ def tratar_som(doc):
         registar_atuador(
             simulacao_id,
             equipa,
-            "porta_ruido_global",
+            "ruido",
             comando_all_door("CloseAllDoor", equipa),
             payload,
         )

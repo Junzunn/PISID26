@@ -1,5 +1,7 @@
+import atexit
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -25,7 +27,8 @@ TOPICOS_SENSORES_BASE = MQTT_CONFIG.get(
     "topic_sensores_base",
     ["pisid_mazemov", "pisid_mazetemp", "pisid_mazesound"]
 )
-CLIENT_ID = f"nuvem-mongo-{uuid.uuid4().hex[:8]}"
+CLIENT_ID_PREFIX = MQTT_CONFIG.get("client_id_prefix_nuvem_mongo", "nuvem_mongo")
+CLIENT_ID = f"{CLIENT_ID_PREFIX}_{socket.gethostname().replace('.', '-')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
 
 MAZE_DB_CONFIG = CONFIG.get("maze_db", {
     "host": "194.210.86.10",
@@ -44,6 +47,105 @@ MONGO_DB = MONGO_CONFIG.get("database", "Marsabirinto")
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 MAZERUN_PATH = os.path.join(BASE_DIR, "mazerun")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
+
+
+# ---- Runtime singleton locks ----
+# This prevents two local nuvem_mongo.py processes from subscribing to the same
+# Start MQTT message and launching two mazerun processes for the same game.
+RUNTIME_DIR = os.path.join(BASE_DIR, "runtime")
+_SERVICE_LOCK = None
+
+
+def _pid_ativo(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _ler_pid_lock(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            primeira_linha = f.readline().strip()
+        return int(primeira_linha) if primeira_linha else None
+    except Exception:
+        return None
+
+
+def _escrever_lock(fd, pid, label):
+    conteudo = (
+        f"{int(pid)}\n"
+        f"label={label}\n"
+        f"started_at={datetime.now().isoformat()}\n"
+        f"script={os.path.abspath(__file__)}\n"
+    ).encode("utf-8")
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, conteudo)
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+
+
+def adquirir_lock_exclusivo(nome, label, sair_se_ativo=False):
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    path = os.path.join(RUNTIME_DIR, f"{nome}.lock")
+
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
+        except FileExistsError:
+            pid_antigo = _ler_pid_lock(path)
+            if pid_antigo and _pid_ativo(pid_antigo):
+                print(f"[LOCK] {label} ja esta ativo pid={pid_antigo}; este processo nao vai duplicar trabalho", flush=True)
+                if sair_se_ativo:
+                    sys.exit(0)
+                return None
+
+            print(f"[LOCK] lock antigo/stale removido: {path}", flush=True)
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            continue
+
+        _escrever_lock(fd, os.getpid(), label)
+        return fd, path
+
+
+def libertar_lock(lock_tuple):
+    if not lock_tuple:
+        return
+    fd, path = lock_tuple
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def adquirir_lock_servico(nome):
+    global _SERVICE_LOCK
+    _SERVICE_LOCK = adquirir_lock_exclusivo(nome, nome, sair_se_ativo=True)
+    atexit.register(lambda: libertar_lock(_SERVICE_LOCK))
+
+
+def adquirir_lock_mazerun(id_simulacao, equipa):
+    return adquirir_lock_exclusivo(
+        f"mazerun_{int(id_simulacao)}_{int(equipa)}",
+        f"mazerun IDSimulacao={int(id_simulacao)} Equipa={int(equipa)}",
+        sair_se_ativo=False,
+    )
+# ---- End runtime singleton locks ----
 
 CAMPOS_OBRIGATORIOS = {
     "movimento": {"Marsami", "Player", "RoomOrigin", "RoomDestiny", "Status"},
@@ -393,60 +495,71 @@ def worker_equipa(client, equipa):
     fila = estado["fila"]
     id_simulacao = estado["IDSimulacao"]
 
-    subscrever_equipa(client, equipa)
-    os.makedirs(LOG_DIR, exist_ok=True)
-    log_path = os.path.join(LOG_DIR, f"mazerun_{id_simulacao}_{equipa}.log")
+    mazerun_lock = adquirir_lock_mazerun(id_simulacao, equipa)
+    if mazerun_lock is None:
+        # Another local nuvem_mongo/worker already started this mazerun.
+        # Do not launch a duplicate mazerun.
+        with lock:
+            estados_por_equipa.pop(equipa, None)
+        print(f"[worker_equipa] mazerun duplicado bloqueado equipa={equipa}, IDSimulacao={id_simulacao}", flush=True)
+        return
 
-    print(f"[worker_equipa] start equipa={equipa}, IDSimulacao={id_simulacao}")
-    print(f"[worker_equipa] log: {log_path}")
+    try:
+        subscrever_equipa(client, equipa)
+        os.makedirs(LOG_DIR, exist_ok=True)
+        log_path = os.path.join(LOG_DIR, f"mazerun_{id_simulacao}_{equipa}.log")
 
-    with open(log_path, "a", encoding="utf-8") as log_file:
-        log_file.write("\n==============================\n")
-        log_file.write(f"Start: {datetime.now().isoformat()}\n")
-        log_file.write(f"IDSimulacao: {id_simulacao}\n")
-        log_file.write(f"Equipa: {equipa}\n")
-        log_file.write(f"Command: {MAZERUN_PATH} {equipa} --flagMessage 1\n")
-        log_file.write("==============================\n")
-        log_file.flush()
+        print(f"[worker_equipa] start equipa={equipa}, IDSimulacao={id_simulacao}", flush=True)
+        print(f"[worker_equipa] log: {log_path}", flush=True)
 
-        processo = subprocess.Popen(
-            [MAZERUN_PATH, str(equipa), "--flagMessage", "1"],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            log_file.write("\n==============================\n")
+            log_file.write(f"Start: {datetime.now().isoformat()}\n")
+            log_file.write(f"IDSimulacao: {id_simulacao}\n")
+            log_file.write(f"Equipa: {equipa}\n")
+            log_file.write(f"Command: {MAZERUN_PATH} {equipa} --flagMessage 1\n")
+            log_file.write("==============================\n")
+            log_file.flush()
 
-        processo_terminou = False
+            processo = subprocess.Popen(
+                [MAZERUN_PATH, str(equipa), "--flagMessage", "1"],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
 
-        while True:
-            if not processo_terminou and processo.poll() is not None:
-                processo_terminou = True
-                log_file.write("\n==============================\n")
-                log_file.write(f"End: {datetime.now().isoformat()}\n")
-                log_file.write(f"Return code: {processo.returncode}\n")
-                log_file.write("==============================\n")
-                log_file.flush()
+            processo_terminou = False
 
-            try:
-                mensagem = fila.get(timeout=0.05)
-            except Empty:
-                if processo_terminou:
-                    break
-                continue
+            while True:
+                if not processo_terminou and processo.poll() is not None:
+                    processo_terminou = True
+                    log_file.write("\n==============================\n")
+                    log_file.write(f"End: {datetime.now().isoformat()}\n")
+                    log_file.write(f"Return code: {processo.returncode}\n")
+                    log_file.write("==============================\n")
+                    log_file.flush()
 
-            try:
-                processar_mensagem(equipa, mensagem)
-            except Exception as erro:
-                print(f"[erro mensagem] equipa={equipa}: {type(erro).__name__}: {erro}")
-            finally:
-                fila.task_done()
+                try:
+                    mensagem = fila.get(timeout=0.05)
+                except Empty:
+                    if processo_terminou:
+                        break
+                    continue
 
-        guardar_fim_jogo(equipa)
+                try:
+                    processar_mensagem(equipa, mensagem)
+                except Exception as erro:
+                    print(f"[erro mensagem] equipa={equipa}: {type(erro).__name__}: {erro}", flush=True)
+                finally:
+                    fila.task_done()
 
-    with lock:
-        estados_por_equipa.pop(equipa, None)
+            guardar_fim_jogo(equipa)
 
-    print(f"[cleanup] nuvem_mongo equipa={equipa}, IDSimulacao={id_simulacao}")
+    finally:
+        libertar_lock(mazerun_lock)
+        with lock:
+            estados_por_equipa.pop(equipa, None)
+        print(f"[cleanup] nuvem_mongo equipa={equipa}, IDSimulacao={id_simulacao}", flush=True)
 
 def tratar_start_php(client, payload):
     id_simulacao = int(payload["IDSimulacao"])
@@ -488,7 +601,7 @@ def tratar_start_php(client, payload):
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
-    print(f"[MQTT] ligado a {MQTT_BROKER}:{MQTT_PORT}")
+    print(f"[MQTT] ligado a {MQTT_BROKER}:{MQTT_PORT} client_id={CLIENT_ID}")
     client.subscribe(TOPICO_PHP, qos=1)
     print(f"[MQTT] subscrito: {TOPICO_PHP}")
 
@@ -497,6 +610,10 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
     for equipa in equipas:
         subscrever_equipa(client, equipa)
+
+
+def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
+    print(f"[MQTT] desligado reason={reason_code}; se isto repetir, verifica client_id duplicado ou rede")
 
 
 def on_message(client, userdata, msg):
@@ -526,12 +643,15 @@ def on_message(client, userdata, msg):
         })
 
 def main():
-    print("[nuvem_mongo] start")
+    adquirir_lock_servico("nuvem_mongo")
+    print(f"[nuvem_mongo] start client_id={CLIENT_ID}", flush=True)
+    print(f"[nuvem_mongo] client_id={CLIENT_ID}")
     carregar_dados_maze()
     ligar_mongo()
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
     client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
     client.on_message = on_message
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
